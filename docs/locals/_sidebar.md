@@ -1,0 +1,11 @@
+- Information
+	- [Home](/)
+- Dictionary
+	- [Core](/core/)
+	- [Exception](/exception/)
+	- [Locals](/locals/)
+		- [\{](/locals/lbrace.md)
+	- [Tools](/tools/)
+	- [Custom](/custom/)
+- Dev
+	- [Kernel Functions](/kernel/)

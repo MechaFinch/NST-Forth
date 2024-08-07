@@ -1,0 +1,5 @@
+src/obj/*
+src/build.bat
+*.oex
+*.dat
+*.lst

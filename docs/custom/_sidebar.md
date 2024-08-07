@@ -1,0 +1,18 @@
+- Information
+	- [Home](/)
+- Dictionary
+	- [Core](/core/)
+	- [Exception](/exception/)
+	- [Locals](/locals/)
+	- [Tools](/tools/)
+	- [Custom](/custom/)
+		- [-! (MSTORE)](/custom/mstore.md)
+		- [-2ROT (N2ROT)](/custom/n2rot.md)
+		- [-ROT (NROT)](/custom/nrot.md)
+		- [2, (2COMMA)](/custom/2comma.md)
+		- [2ROT](/custom/2rot.md)
+		- [2OSWAP](/custom/2oswap.md)
+		- [INTERPRET](/custom/interpret.md)
+		- [OSWAP](/custom/oswap.md)
+- Dev
+	- [Kernel Functions](/kernel/)

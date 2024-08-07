@@ -1,0 +1,10 @@
+- Information
+	- [Home](/)
+- Dictionary
+	- [Core](/core/)
+	- [Exception](/exception/)
+	- [Locals](/locals/)
+	- [Tools](/tools/)
+	- [Custom](/custom/)
+- Dev
+	- [Kernel Functions](/kernel/)

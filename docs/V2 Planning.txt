@@ -1,0 +1,118 @@
+
+	Design Goals
+-	Operating System Capable
+	-	Uses OS memory allocation
+	-	Uses OS file system
+	-	(Long Term) Support OS calls
+	-	Required OS Components
+		-	Terminal x
+		-	Filesystem
+		-	Memory Management x
+		-	Executables
+-	Designed for Locals
+-	Fully Documented
+	-	Maintain a list of all implemented words
+	-	Document non-standard words and non-standard practices
+
+
+
+	Style
+	Subroutine-threaded
+
+
+
+	Register Assignments
+D:A	Top of Stack
+B:C	caller saved scratch
+J:I	caller saved scratch
+L:K	Locals Stack Pointer
+BP	Parameter Stack Pointer
+SP	Return Stack Pointer
+
+
+
+	Dictionary Entry Structure
+Name				Offset	Size	Description
+Link				0		4		Pointer to previous dictionary word
+Length & Flags		4		1		bit 7:		Immediate	If set, executed during compilation
+									bit 6:		Smudge		If set, ignored by search
+									bit 5:		Inline		If set, can be copied rather than called
+									bit 4-0:	Length		Unsigned length of word name
+Name				5		n		Word name
+(Not Inline) Data	5+n		x		Word data
+(Inline) Code Size	5+n		2		Number of bytes to copy into instruction stream
+									bit 15:		Always		If set, word will always be inlined. Used by locals.
+									bit 14:		Strict		If set, word will be inlined in strict inlining mode
+															Set only if code <= 4 instructions & <= 8 bytes
+									bit 13-0:	Size		Number of bytes
+(Inline) Data		7+n		x		Word data
+
+
+
+	Control-Flow Stack Structures
+Name			Field Name		Offset	Size	Description
+colon-sys		Header			0		4		Points to word header
+nest-sys		Return Pointer	0		4		Value from CALL
+
+
+
+	Memory
+FakeOS Environment
+	0000_0000 - 0001_FFFF	OS & relocated code (kernel relocated by emulator)
+	0002_0000 - 000E_FFFF	OS managed memory
+	000F_0000 - 000F_FFFF	SP stack
+
+Real OS Environment
+	0000_0000 - 0000_3FFF	BIOS Reserved
+	0000_4000 - 000E_FFFF	OS & OS managed memory (kernel relocated by OS)
+	000F_0000 - 000F_FFFF	SP stack
+	
+Kernel Memory Regions
+	64k		Return Stack (not malloc'd)
+	64k		Parameter Stack
+	64k		Locals Stack
+	8k		Locals Dictionary
+	128k	User Dictionary
+
+
+
+	Inlining
+Inlining a word may be always better, or a tradeoff between code size and speed. Words with 3 or
+less instructions break even or improve instruction count. Words with code sizes of 5 bytes or less
+may reduce code size. Inlining viability will strongly depend on the performance of CALL and RET.
+3 inlining modes are available:
+	- Inline Always		Inline all inlinable words
+	- Inline Strict		Inline inlinable words with the strict bit set
+	- Inline Never		Inline nothing
+
+An inlinable word must use absolute addresses for external references. The word INLINEABLE: creates
+a : definition and sets a flag such that CALLA is used rather than CALL.
+
+
+
+	Locals Notes
+-	Locals are accessed as positive offsets from L:K
+-	Locals have their own dictionary, which is searched first
+-	Local definitions are immediate words which call a kernel function with their type and current offset
+-	Offset is 1 byte [0, 127] allowing 128 bytes of locals per definition
+-	When a local is defined, the offset of other locals are incremented by its size
+-	When a local is undefined, the offset of other locals are decremented by its size
+-	Local initialization memcopies the total size of the locals from the param stack to the locals stack
+-	All control flow words track how many locals should remain after their scope
+
+Dictionary Entry Structure
+	<header, immediate>
+	0x0A <offset> <type>		; MOV C, offset/type
+	JMP kernel_compile_local	; JMP to return to caller faster
+
+-	Value locals take the form
+	<push>
+	<MOV TOS, [L:K + offset]>
+-	Variable locals take the form
+	<push>
+	<LEA TOS, [L:K + offset]>
+
+	Type			Size
+	Character		1
+	Cell			4
+	Double Cell		8
