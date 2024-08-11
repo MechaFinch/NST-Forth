@@ -52,6 +52,21 @@ Name				5		n		Word name
 	Control-Flow Stack Structures
 Name			Field Name		Offset	Size	Description
 colon-sys		Header			0		4		Points to word header
+
+do-sys
+
+case-sys
+
+of-sys
+
+orig			Locals Count	0		4		Number of locals at origin
+				Jump Address	4		4		Address of 16-bit immediate in branch
+
+dest			Locals Count	0		4		Number of locals at destination
+				Target Address	4		4		Address to branch to
+
+loop-sys
+				
 nest-sys		Return Pointer	0		4		Value from CALL
 
 

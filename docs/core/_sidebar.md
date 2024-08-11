@@ -3,6 +3,7 @@
 - Dictionary
 	- [Core](/core/)
 	- [Exception](/exception/)
+	- [Facility](/facility/)
 	- [Locals](/locals/)
 	- [Tools](/exception/)
 	- [Custom](/custom/)

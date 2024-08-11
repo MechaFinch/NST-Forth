@@ -5,6 +5,7 @@
 	<dd>None</dd>
 	<dt>Clobbers</dt>
 	<dd>B:C</dd>
+	<dd>J:I</dd>
 </dl>
 
  Prints the counted string found inline after the CALL to this function

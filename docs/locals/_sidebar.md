@@ -3,6 +3,7 @@
 - Dictionary
 	- [Core](/core/)
 	- [Exception](/exception/)
+	- [Facility](/facility/)
 	- [Locals](/locals/)
 		- [\{](/locals/lbrace.md)
 	- [Tools](/tools/)

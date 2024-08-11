@@ -51,6 +51,7 @@
 ; Characters
 %define CHAR_BACKSPACE 0x08
 %define CHAR_NEWLINE 0x0A
+%define CHAR_ESCAPE 0x1B
 %define CHAR_SPACE 0x20
 %define CHAR_SINGLE_QUOTE 0x27
 
@@ -83,6 +84,8 @@
 %define TCODE_RSTACK_OVERFLOW		-5
 %define TCODE_RSTACK_UNDERFLOW		-6
 %define TCODE_DICTIONARY_OVERFLOW	-8
+
+%define TCODE_OUT_OF_RANGE			-11
 
 %define TCODE_UNDEFINED_WORD		-13
 %define TCODE_COMPILE_ONLY			-14
@@ -141,7 +144,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_lbrace
+%define DICT_LATEST fhead_else
 
 
 
@@ -158,8 +161,24 @@ entry:
 	; get OS running
 	CALL os.init
 .start:
-
+	
+	; User dictionary, 128k
+	MOV A, OS_MALLOC
+	MOVW C:D, PARAM_USER_DICT_SIZE
+	SYSCALL
+	MOVW [uvar_user_dict_origin], D:A
+	MOVW [uvar_here], D:A
+	LEA D:A, [D:A + (PARAM_USER_DICT_SIZE - PARAM_USER_DICT_PADDING)]
+	MOVW [uvar_user_dict_end], D:A
+	
 	; allocate regions of dynamic memory
+	; Locals dictionary, 8k
+	MOV A, OS_MALLOC
+	MOVW C:D, PARAM_LOCAL_DICT_SIZE
+	SYSCALL
+	MOVW [uvar_locals_dict_origin], D:A
+	MOVW [uvar_locals_here], D:A
+	
 	; Parameter stack
 	MOV A, OS_MALLOC
 	MOVW C:D, PARAM_PARAM_STACK_SIZE
@@ -177,22 +196,6 @@ entry:
 	MOVW [uvar_locals_stack_end], D:A
 	LEA D:A, [D:A + (PARAM_LOCAL_STACK_SIZE - (PARAM_STACK_PADDING * 2))]
 	MOVW [uvar_locals_stack_origin], D:A
-	
-	; Locals dictionary, 8k
-	MOV A, OS_MALLOC
-	MOVW C:D, PARAM_LOCAL_DICT_SIZE
-	SYSCALL
-	MOVW [uvar_locals_dict_origin], D:A
-	MOVW [uvar_locals_here], D:A
-	
-	; User dictionary, 128k
-	MOV A, OS_MALLOC
-	MOVW C:D, PARAM_USER_DICT_SIZE
-	SYSCALL
-	MOVW [uvar_user_dict_origin], D:A
-	MOVW [uvar_here], D:A
-	LEA D:A, [D:A + (PARAM_USER_DICT_SIZE - PARAM_USER_DICT_PADDING)]
-	MOVW [uvar_user_dict_end], D:A
 	
 	; Terminal buffer, 256
 	MOV A, OS_MALLOC
@@ -299,7 +302,7 @@ kernel_print_name:
 
 ; print_inline
 ; Prints the counted string pointed to by SP, and returns to SP + length + 1
-; Clobbers B:C
+; Clobbers B:C, J:I
 kernel_print_inline:
 	MOVW J:I, [SP]				; get string
 	CALL kernel_print_counted	; print
@@ -1366,6 +1369,39 @@ kernel_init_locals:
 	CMP CL, 4
 	JA .compile_memcopy
 	
+	; if in no inlining mode, use function calls
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JE .compile_short_function
+	
+	; if in strict inlining mode, use function calls for 2-4
+	CMP byte [uvar_inlining_mode], INLINE_MODE_STRICT
+	JNE .compile_inline
+	
+	CMP CL, 1
+	JE .compile_inline
+
+.compile_short_function:
+	; compile:
+	; CALL kernel_do_init_locals_n
+	MOVZ C, CL
+	MOVW J:I, [.function_table + C*4]
+	
+	MOV A, 0x01_3B					; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4			; CALL i32, n/a, CALL i16, CALL i8
+	MOVW L:K, [uvar_here]			; destination
+	CALL kernel_compile_number		; L:K = HERE
+	
+	MOVW [uvar_here], L:K
+	JMP .ret
+
+.function_table:
+	dp 0
+	dp kernel_do_init_locals_1
+	dp kernel_do_init_locals_2
+	dp kernel_do_init_locals_3
+	dp kernel_do_init_locals_4
+	
+.compile_inline:
 	; <= 4 locals
 	; 4 + 4n bytes
 	; SUB K, bytes			2
@@ -1409,56 +1445,135 @@ kernel_init_locals:
 	JMP .ret
 	
 	; > 4 locals, compile a memcopy call
-	; 19-21 bytes
-	; SUB K, bytes			2
-	; DCC L					1
-	; BPUSHW D:A			2
-	; MOVZ D:A, bytes		4
-	; MOVW B:C, BP			2
-	; MOVW J:I, L:K			2
-	; CALL kernel_memcopy	2-5
-	; ADD BP, bytes 		2
-	; BPOPW D:A				2
+	; CALL kernel_do_init_locals
+	; db bytes
 .compile_memcopy:
 	MOV CH, CL		; CH = bytes
 	SHL CH, 2
 	PUSH CH
-	MOV CL, 0x86	; C = SUB K, bytes
-	MOV B, 0x53_8F	; B = DCC L; BPUSHW rim
 	
-	MOVW J:I, [uvar_here]
-	MOVW [J:I], B:C
+	MOV A, 0x01_3B					; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4			; CALL i32, n/a, CALL i16, CALL i8
+	MOVW L:K, [uvar_here]			; destination
+	MOVW J:I, kernel_do_init_locals	; value
+	CALL kernel_compile_number		; L:K = HERE
 	
-	MOV CL, 0x00		; D:A
-	MOV [J:I + 4], CL	; complete BPUSHW D:A
+	POP CH			; place argument
+	MOV [L:K], CH
 	
-	MOVZ B, [SP]	; B = bytes
-	MOV C, 0x40_03	; B:C = MOVZ D:A, bytes
-	MOVW [J:I + 5], B:C
-	
-	MOVW B:C, 0x25_2B_16_2B	; B:C = MOVW B:C, BP; MOVW J:I, L:K
-	MOVW [J:I + 9], B:C
-	
-	ADD I, 13
-	ICC J
-	
-	MOV A, 0x01_3B				; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
-	MOVW B:C, 0xD6_00_D5_D4		; CALL i32, n/a, CALL i16, CALL i8
-	MOVW L:K, J:I				; destination
-	MOVW J:I, kernel_memcopy	; value
-	CALL kernel_compile_number	; L:K = HERE
-	
-	MOVW B:C, 0x00_57_00_97	; B:C = ADD BP, bytes; BPOPW D:A
-	POP CH
-	MOVW [L:K], B:C
-	
-	ADD K, 4
+	INC K			; update HERE
 	ICC L
 	MOVW [uvar_here], L:K
 	
 .ret:
 	POPW L:K
 	POPW D:A
+.fret:
+	RET
+
+
+
+; do_init_locals:
+; Init n bytes of locals, n is an inline byte
+kernel_do_init_locals:
+	MOVW J:I, [SP]	; get argument & return address
+	
+	MOVZ C, [J:I]
+	SUB K, C	; make space on locals stack
+	DCC L
+	
+	PUSH C
+	BPUSHW D:A		; memcopy from param to local
+	MOVZ D:A, C		; length
+	MOVW B:C, BP	; source
+	MOVW J:I, L:K	; destomatopm
+	CALL kernel_memcopy
+	
+	POP C			; pop from param stack
+	LEA BP, [BP + C]
+	BPOPW D:A
+
+	POPW J:I	; return & skip argument
+	INC I
+	ICC J
+	JMPA J:I
+
+
+
+; do_init_locals_1:
+; Init 1 local (4 bytes)
+kernel_do_init_locals_1:
+	SUB K, 4
+	DCC L
+	MOVW [L:K], D:A
+	BPOPW D:A
+	RET
+
+
+
+; do_init_locals_2:
+; Init 2 locals (8 bytes)
+kernel_do_init_locals_2:
+	SUB K, 8
+	DCC L
+	MOVW [L:K], D:A
+	BPOPW ptr [L:K + 4]
+	BPOPW D:A
+	RET
+
+
+
+; do_init_locals_3:
+; Init 3 locals (12 bytes)
+kernel_do_init_locals_3:
+	SUB K, 12
+	DCC L
+	MOVW [L:K], D:A
+	BPOPW ptr [L:K + 4]
+	BPOPW ptr [L:K + 8]
+	BPOPW D:A
+	RET
+
+
+
+; do_init_locals_4:
+; Init 4 locals (16 bytes)
+kernel_do_init_locals_4:
+	SUB K, 16
+	DCC L
+	MOVW [L:K], D:A
+	BPOPW ptr [L:K + 4]
+	BPOPW ptr [L:K + 8]
+	BPOPW ptr [L:K + 12]
+	BPOPW D:A
+	RET
+
+
+
+; compile_remove_locals
+; Compiles code to remove the given number of locals from the locals stack. Does not affect definitions.
+; Arguments CL = n
+; Returns J:I = HERE
+; Clobbers C
+kernel_compile_remove_locals:
+	MOVW J:I, [uvar_here]
+	CMP CL, 0
+	JE .fret
+	
+	; compile:
+	; ADD K, bytes
+	; ICC L
+	MOV CH, CL
+	MOV CL, 0x76
+	MOV [J:I], C
+	
+	MOV CL, 0x7F
+	MOV [J:I + 2], CL
+	
+	ADD I, 3
+	ICC J
+	MOVW [uvar_here], J:I
+	
 .fret:
 	RET
 
@@ -1472,27 +1587,15 @@ kernel_remove_locals:
 	CMP CL, 0
 	JE .fret
 	
-	; compile:
-	; ADD K, bytes
-	; ICC L
+	; compile removal
 	PUSH CL
+	CALL kernel_compile_remove_locals
+	
+	; remove locals
+	MOV CL, [SP]
 	MOV CH, CL
 	SHL CH, 2
 	SUB [uvar_locals_size], CH
-	MOV CL, 0x76
-	
-	MOVW J:I, [uvar_here]
-	MOV [J:I], C
-	
-	MOV CL, 0x7F
-	MOV [J:I + 2], CL
-	
-	ADD I, 3
-	ICC J
-	MOVW [uvar_here], J:I
-	
-	; remove locals
-	POP CL
 	SUB [uvar_locals_count], CL
 	MOVW J:I, [uvar_locals_latest]
 .get_latest_loop:
@@ -1501,6 +1604,27 @@ kernel_remove_locals:
 	JNZ .get_latest_loop
 	
 	MOVW [uvar_locals_latest], J:I
+
+	; decrement remaining offsets
+	POP CL		; CL = decrement amount, CH = counter
+	SHL CL, 2
+	MOV CH, [uvar_locals_count]
+	INC CH
+	JMP .dec_offset_loop_check
+	
+.dec_offs_loop:
+	MOVZ B, [J:I + 4]	; get offset from header ptr to offset field
+	AND BL, HMASK_LENGTH
+	ADD B, 6
+	
+	SUB [J:I + B], CL	; decrement
+	
+	MOVW J:I, [J:I]		; next
+
+.dec_offset_loop_check:
+	DEC CH
+	JNZ .dec_offs_loop
+	
 
 .fret:
 	RET
@@ -1529,10 +1653,47 @@ kernel_reset_locals:
 ; Arguments CH = type, CL = offset
 ; Clobbers B, J:I
 kernel_compile_local:
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JNE .inline
+	
+	PUSHW D:A
+	PUSHW L:K
+	
+	; compile:
+	; CALL kernel_do_get_local_(val/addr)
+	TST CH, 0x04	; value or variable?
+	JZ .func_val
+
+.func_var:
+	MOVW J:I, kernel_do_get_local_addr
+	JMP .compile_function
+
+.func_val:
+	MOVW J:I, kernel_do_get_local_val
+	
+.compile_function:
+	PUSH CL
+	
+	MOV A, 0x01_3B					; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4			; CALL i32, n/a, CALL i16, CALL i8
+	MOVW L:K, [uvar_here]			; destination
+	CALL kernel_compile_number		; L:K = HERE
+	
+	POP CL	; place argument
+	MOV [L:K], CL
+	
+	INC K	; update HERE
+	ICC L
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	POPW D:A
+	JMP .ret
+
+.inline:
 	; compile:
 	; BPUSHW D:A
 	MOVW J:I, [uvar_here]
-	
 	MOV B, 0x00_53	; BPUSHW D:A
 	MOV [J:I], B
 	
@@ -1560,7 +1721,51 @@ kernel_compile_local:
 	ADD I, 6
 	ICC J
 	MOVW [uvar_here], J:I
+
+.ret:
+	RET
+
+
+
+; do_get_local_val
+; Gets the value of the local specified by the byte after the CALL
+kernel_do_get_local_val:
+	MOVW J:I, [SP]	; return address - 1
+	MOVZ C, [J:I]	; argument
 	
+	BPUSHW D:A		; push & get value
+	MOVW D:A, [L:K + C]
+	
+	INC I			; return
+	ICC J
+	JMPA J:I
+
+
+
+; do_get_local_addr
+; Gets the address of the local specified by the byte after the CALL
+kernel_do_get_local_addr:
+	MOVW J:I, [SP]	; return address - 1
+	MOVZ C, [J:I]	; argument
+	
+	BPUSHW D:A		; push & get value
+	LEA D:A, [L:K + C]
+	
+	INC I			; return
+	ICC J
+	JMPA J:I
+
+
+
+; get_body
+; Gets the body address of the given header
+; Arguments J:I = header pointer
+; Returns J:I = body pointer
+; Clobbers B
+kernel_get_body:
+	MOVZ B, [J:I + 4]		; length/flags
+	AND BL, HMASK_LENGTH
+	LEA J:I, [J:I + B + 5]	; header -> body
 	RET
 
 
@@ -1859,10 +2064,30 @@ fword_dot:
 	BPOPW D:A					; pop
 	
 	; print space
-	MOV CL, CHAR_SPACE
-	CALL kernel_print_char
+	CALL fword_space
 	
 	; good time for this
+	CALL kernel_check_overflow
+	RET
+
+
+
+; UDOT ( u -- )
+; Display u
+fhead_udot:
+	dp fhead_dot
+	db 2
+	db "U."
+fword_udot:
+	; print u
+	MOV BH, 0					; unsigned
+	MOV BL, [uvar_base]			; use base
+	MOVW J:I, D:A				; number
+	CALL kernel_print_number	; print
+	BPOPW D:A					; pop
+	
+	CALL fword_space			; space
+	
 	CALL kernel_check_overflow
 	RET
 
@@ -1871,7 +2096,7 @@ fword_dot:
 ; CR ( -- )
 ; Print a newline
 fhead_cr:
-	dp fhead_dot
+	dp fhead_udot
 	db 2
 	db "CR"
 fword_cr:
@@ -2095,6 +2320,9 @@ fword_quit:
 	CMP A, TCODE_DICTIONARY_OVERFLOW
 	JGE .exception_table
 	
+	CMP A, TCODE_OUT_OF_RANGE
+	JE .exception_out_of_range
+	
 	CMP A, TCODE_UNDEFINED_WORD
 	JE .exception_undef_word
 	CMP A, TCODE_COMPILE_ONLY
@@ -2212,6 +2440,11 @@ fword_quit:
 .exception_dictionary_overflow:
 	CALL kernel_print_inline
 	db 30, "Aborted: Dictionary overflow.", CHAR_NEWLINE
+	JMP .exception_end
+
+.exception_out_of_range:
+	CALL kernel_print_inline
+	db 30, "Aborted: Result out of range.", CHAR_NEWLINE
 	JMP .exception_end
 
 .exception_undef_word:
@@ -2406,16 +2639,35 @@ fword_colon:
 
 
 
+; COMPILE-ONLY ( nt -- )
+; Throws exception -14 if not compiling, setting thrower to nt
+fhead_compile_only:
+	dp fhead_colon
+	db 12
+	db "COMPILE-ONLY"
+fword_compile_only:
+	CMP byte [uvar_state], 0
+	JZ .throw
+	BPOPW D:A
+	RET
+
+.throw:
+	MOVW [uvar_exceptions_thrower], D:A
+	MOVW D:A, TCODE_COMPILE_ONLY
+	JMP fword_throw
+
+
+
 ; SEMICOLON CT: ( colon-sys -- )
 ; Ends the current definition. 
 fhead_semicolon:
-	dp fhead_colon
+	dp fhead_compile_only
 	db 1 | HFLAG_IMMEDIATE
 	db ";"
 fword_semicolon:
-	; Check state
-	CMP byte [uvar_state], 0
-	JZ .compile_only
+	BPUSHW D:A
+	MOVW D:A, fhead_semicolon
+	CALL fword_compile_only
 	
 	; Remove locals
 	MOV CL, [uvar_locals_count]
@@ -2442,15 +2694,6 @@ fword_semicolon:
 	; pop colon-sys
 	BPOPW D:A
 	RET
-	
-	; exceptions
-.compile_only:
-	MOVW B:C, fhead_semicolon
-	MOVW [uvar_exceptions_thrower], B:C
-
-	BPUSHW D:A
-	MOVW D:A, TCODE_COMPILE_ONLY
-	JMP fword_throw
 
 
 
@@ -3179,4 +3422,1108 @@ fword_lbrace:
 .exception_out_of_parse:
 	BPUSHW D:A
 	MOVW D:A, TCODE_MALFORMED_LOCALS
+	JMP fword_throw
+
+
+
+; STATE ( -- a-addr )
+; Gets the address of the STATE variable
+fhead_state:
+	dp fhead_lbrace
+	db 5
+	db "STATE"
+fword_state:
+	BPUSHW D:A
+	MOVW D:A, uvar_here
+	RET
+
+
+
+; BASE ( -- a-addr)
+; Gets the address of the BASE variable
+fhead_base:
+	dp fhead_state
+	db 4
+	db "BASE"
+fword_base:
+	BPUSHW D:A
+	MOVW D:A, uvar_base
+	RET
+
+
+
+; DECIMAL ( -- )
+; Sets BASE to 10
+fhead_decimal:
+	dp fhead_base
+	db 7
+	db "DECIMAL"
+fword_decimal:
+	MOVW B:C, 10
+	MOVW [uvar_base], B:C
+	RET
+
+
+
+; HEX ( -- )
+; Sets BASE to 16
+fhead_hex:
+	dp fhead_decimal
+	db 3
+	db "HEX"
+fword_hex:
+	MOVW B:C, 16
+	MOVW [uvar_base], B:C
+	RET
+
+
+
+; PAGE ( -- )
+; Clears the screen and sends the cursor home
+fhead_page:
+	dp fhead_hex
+	db 4
+	db "PAGE"
+fword_page:
+	CALL kernel_print_inline
+	db 7, CHAR_ESCAPE, "[2J", CHAR_ESCAPE, "[H"
+	RET
+
+
+
+; DEPTH ( -- +n )
+; +n is the number of cells on the parameter stack before it was pushed
+fhead_depth:
+	dp fhead_page
+	db 5
+	db "DEPTH"
+fword_depth:
+	; D:A = diff between origin and bp
+	MOVW B:C, BP
+	BPUSH D:A
+	MOVW D:A, [uvar_param_stack_origin]
+	SUB A, C
+	SBB D, B
+	
+	; depth = diff / 4
+	SHR D, 1	; / 4
+	RCR A, 1
+	SHR D, 1
+	RCR A, 1
+	RET
+
+
+
+; .S ( -- )
+; Display the contents of the parameter stack
+fhead_dots:
+	dp fhead_depth
+	db 2
+	db ".S"
+fword_dots:
+	; display <depth>
+	MOV CL, "<"
+	CALL kernel_print_char
+	CALL fword_depth
+	PUSHW D:A	; save
+	CALL fword_dot
+	CALL kernel_print_inline
+	db 3, CHAR_BACKSPACE, "> "
+	
+	; Display stack
+	POPW J:I							; depth
+	CMP I, 0
+	JNZ .not_empty
+	CMP J, 0
+	JZ .empty
+
+.not_empty:
+	MOVW B:C, [uvar_param_stack_origin]	; start of stack
+	SUB C, 8							; skip 1st entry cause its not real
+	DCC B
+	JMP .cmp
+	
+.loop:
+	BPUSHW D:A		; get item
+	MOVW D:A, [B:C]
+	
+	PUSHW B:C
+	PUSHW J:I
+	
+	CALL fword_dot	; print item
+	
+	POPW J:I
+	POPW B:C
+	
+	SUB C, 4
+	DCC B
+	
+	DEC I
+	DCC J
+	
+.cmp:
+	CMP I, 1	; 1 left = show D:A
+	JNZ .loop
+	CMP J, 0
+	JNZ .loop
+	
+	BPUSHW D:A
+	CALL fword_dot
+
+.empty:	
+	; CR0
+	CALL fword_cr
+	RET
+
+
+
+; ( ( "ccc<rparen>" -- )
+; Parse and discard until a )
+fhead_paren:
+	dp fhead_dots
+	db 1 | HFLAG_IMMEDIATE
+	db "("
+fword_paren:
+	MOV CL, ")"
+	CALL kernel_parse_token
+	RET
+
+
+
+; \ ( "ccc<eol>" -- )
+; Parse and discard the remainder of the line
+fhead_backslash:
+	dp fhead_paren
+	db 1 | HFLAG_IMMEDIATE
+	db "\"
+fword_backslash:
+	MOV CL, CHAR_NEWLINE
+	CALL kernel_parse_token
+	RET
+
+
+
+; ? ( a-addr -- )
+; Display the value at a-addr.
+; : ? @ . ;
+fhead_question:
+	dp fhead_backslash
+	db 1
+	db "?"
+fword_question:
+	MOVW D:A, [D:A]	; fetch
+	CALL fword_dot	; print
+	RET
+
+
+
+; DUMP ( addr u -- )
+; Display the contents of u consecutive addresses
+; Values are displayed as a hex dump in rows of 8 bytes
+fhead_dump:
+	dp fhead_question
+	db 4
+	db "DUMP"
+fword_dump:
+	CMP A, 0
+	JNZ .nonzero
+	CMP D, 0
+	JNZ .nonzero
+	
+	ADD BP, 4
+	BPOPW D:A
+	RET
+
+.nonzero:
+	PUSHW L:K
+	
+	; B:C = count
+	; J:I = address
+	; L:K = target
+	MOVW B:C, 0		; count
+	BPOPW J:I		; addr
+	MOVW L:K, D:A	; target
+	JMP .skip_first_cr
+	
+.loop:
+	; is this the start of a row
+	TST CL, 0x07
+	JNZ .not_row_start
+	
+	PUSHW B:C
+	PUSHW J:I
+	CALL fword_cr
+	POPW J:I
+	POPW B:C
+	
+	; display address
+.skip_first_cr:
+	MOVW D:A, J:I
+	XCHG DH, DL
+	CALL .sub_display_byte
+	MOV DL, DH
+	CALL .sub_display_byte
+	MOV DL, AH
+	CALL .sub_display_byte
+	MOV DL, AL
+	CALL .sub_display_byte
+	
+	PUSHW B:C
+	PUSHW J:I
+	CALL kernel_print_inline
+	db 2, ": "
+	POPW J:I
+	POPW B:C
+
+.not_row_start:
+	; print byte
+	MOV DL, [J:I]
+	CALL .sub_display_byte
+	
+	; print space
+	PUSHW B:C
+	PUSHW J:I
+	CALL fword_space
+	POPW J:I
+	POPW B:C
+	
+	; inc/dec
+	INC C	; count
+	ICC B
+	INC I	; address
+	ICC J
+	
+	DEC K	; remaining
+	DCC L
+	
+	JNZ .loop	; done?
+	CMP K, 0
+	JNZ .loop
+	
+	CALL fword_cr
+	POPW L:K
+	BPOPW D:A	; pop
+	RET
+
+	; Displays byte in DL
+.sub_display_byte:
+	PUSHW B:C
+	PUSHW J:I
+	
+	MOV CL, DL	; upper nybble
+	SHR CL, 4
+	CALL .sub_print_nybble
+	
+	MOV CL, DL
+	AND CL, 0x0F
+	CALL .sub_print_nybble
+	
+	POPW J:I
+	POPW B:C
+	RET
+
+.sub_print_nybble:
+	CMP CL, 10
+	MOV CH, '0'
+	CMOVAE CH, 'A' - 10
+	ADD CL, CH
+	CALL kernel_print_char
+	RET
+
+
+
+; MAX ( n1 n2 -- n3 )
+; n3 = max(n1, n2)
+fhead_max:
+	dp fhead_dump
+	db 3
+	db "MAX"
+fword_max:
+	BPOPW B:C	; get n2
+	CMP D, B
+	JNE .move
+	CMP A, C
+.move:
+	CMOVL D, B
+	CMOVL A, C
+	RET
+
+
+
+; MIN ( n1 n2 -- n3 )
+; n3 = min(n1, n2)
+fhead_min:
+	dp fhead_max
+	db 3
+	db "MIN"
+fword_min:
+	BPOPW B:C	; get n2
+	CMP D, B
+	JNE .move
+	CMP A, C
+.move:
+	CMOVG D, B
+	CMOVG A, C
+	RET
+
+
+
+; ABS ( n -- u )
+; u is the absolute value of n
+fhead_abs:
+	dp fhead_min
+	db 3 | HFLAG_INLINE
+	db "ABS"
+	dw (fword_abs.end - fword_abs)
+fword_abs:
+	CMP D, 0	;	2	2
+	JNS .ok		;	2	4
+	NOT D		;	2	6
+	NEG A		;	2	8
+	ICC D		;	1	9
+.ok:
+.end:
+	RET
+
+
+
+; TRUE ( -- true )
+; Get a true flag
+fhead_true:
+	dp fhead_abs
+	db 4 | HFLAG_INLINE
+	db "TRUE"
+	dw HFLAG_INLINE_STRICT | (fword_true.end - fword_true)
+fword_true:
+	BPUSHW D:A			;	2	2
+	MOVW D:A, FLAG_TRUE	;	4	6
+.end:
+	RET
+
+
+
+; FALSE ( -- false )
+; Get a false flag
+fhead_false:
+	dp fhead_true
+	db 5 | HFLAG_INLINE
+	db "FALSE"
+	dw HFLAG_INLINE_STRICT | (fword_false.end - fword_false)
+fword_false:
+	BPUSHW D:A				;	2	2
+	MOVW D:A, FLAG_FALSE	;	4	6
+.end:
+	RET
+
+
+
+; AND ( x1 x2 -- x3 )
+; x3 is the bitwise AND of x1 and x2
+fhead_and:
+	dp fhead_false
+	db 3 | HFLAG_INLINE
+	db "AND"
+	dw HFLAG_INLINE_STRICT | (fword_and.end - fword_and)
+fword_and:
+	BPOPW B:C	;	2	2
+	AND A, C	;	2	4
+	AND D, B	;	2	6
+.end:
+	RET
+
+
+
+; OR ( x1 x2 -- x3 )
+; x3 is the bitwise OR of x1 and x2
+fhead_or:
+	dp fhead_and
+	db 2 | HFLAG_INLINE
+	db "OR"
+	dw HFLAG_INLINE_STRICT | (fword_or.end - fword_or)
+fword_or:
+	BPOPW B:C	;	2	2
+	OR A, C		;	2	4
+	OR D, B		;	2	6
+.end:
+	RET
+
+
+
+; XOR ( x1 x2 -- x3 )
+; x3 is the bitwise XOR of x1 and x2
+fhead_xor:
+	dp fhead_or
+	db 3 | HFLAG_INLINE
+	db "XOR"
+	dw HFLAG_INLINE_STRICT | (fword_xor.end - fword_xor)
+fword_xor:
+	BPOPW B:C	;	2	2
+	XOR A, C	;	2	4
+	XOR D, B	;	2	6
+.end:
+	RET
+
+
+
+; INVERT ( x1 -- x2 )
+; Invert all bits of x1 to get x2
+fhead_invert:
+	dp fhead_xor
+	db 6 | HFLAG_INLINE
+	db "INVERT"
+	dw HFLAG_INLINE_STRICT | (fword_invert.end - fword_invert)
+fword_invert:
+	NOT A	;	2	2
+	NOT D	;	2	4
+.end:
+	RET
+
+
+
+; NEGATE ( n1 -- n2 )
+; n2 is the arithmetic inverse of n1
+fhead_negate:
+	dp fhead_invert
+	db 6 | HFLAG_INLINE
+	db "NEGATE"
+	dw HFLAG_INLINE_STRICT | (fword_negate.end - fword_negate)
+fword_negate:
+	NOT D	;	2	2
+	NEG A	;	2	4
+	ICC D	;	1	5
+.end:
+	RET
+
+
+
+; LSHIFT ( x1 u -- x2 )
+; Shifts x1 left by u bits, filling with zeros.
+fhead_lshift:
+	dp fhead_negate
+	db 6
+	db "LSHIFT"
+fword_lshift:
+	BPOPW B:C	; B:C = u, D:A = x1
+	XCHGW D:A, B:C
+	
+	CMP B, 0	; out-of-range = 0
+	JA .zero
+	CMP C, 32
+	JAE .zero
+	
+	MOV I, C	; I = number of bytes to shift
+	SHR I, 3
+	AND C, 0x07	; C = number of bits to shift
+	JMP byte [IP + I]
+	db @.bits
+	db @.1byte
+	db @.2byte
+	db @.3byte
+
+.3byte:	; having A be zero is convenient
+	MOV DH, AL
+	MOV DL, 0
+	MOV A, 0
+	SHL D, C
+	RET
+
+.2byte:
+	MOV D, A
+	MOV A, 0
+	SHL D, C
+	RET
+
+.1byte: ; having A be nonzero is inconvenient
+	MOV DH, DL
+	MOV DL, AH
+	MOV AH, AL
+	MOV AL, 0
+	CMP C, 0
+	JNE .bits
+	RET
+
+.bits:
+	SHL A, 1
+	RCL D, 1
+	DEC C
+	JNZ .bits
+	RET
+
+.zero:
+	MOVW D:A, 0
+	RET
+
+
+
+; RSHIFT ( x1 u -- x2 )
+; Shifts x1 right by u bits, filling with zeros.
+fhead_rshift:
+	dp fhead_lshift
+	db 6
+	db "RSHIFT"
+fword_rshift:
+	BPOPW B:C	; B:C = u, D:A = x1
+	XCHGW D:A, B:C
+	
+	CMP B, 0	; out-of-range = 0
+	JA .zero
+	CMP C, 32
+	JAE .zero
+	
+	MOV I, C	; I = number of bytes to shift
+	SHR I, 3
+	AND C, 0x07	; C = number of bits to shift
+	JMP byte [IP + I]
+	db @.bits
+	db @.1byte
+	db @.2byte
+	db @.3byte
+
+.3byte:	; having D be zero makes things convenient
+	MOVZ A, DH
+	MOV D, 0
+	SHR A, C
+	RET
+
+.2byte:
+	MOVZ D:A, D
+	SHR A, C
+	RET
+
+.1byte:	; having D be nonzero makes thing inconvenient
+	MOV AL, AH
+	MOV AH, DL
+	MOVZ D, DH
+	CMP C, 0
+	JNE .bits
+	RET
+
+.bits:
+	SHR D, 1
+	RCR A, 1
+	DEC C
+	JNZ .bits
+	RET
+
+.zero:
+	MOVW D:A, 0
+	RET
+
+
+
+; 2* ( x1 -- x2 )
+; : 2* 1 LSHIFT ;
+fhead_2star:
+	dp fhead_rshift
+	db 2 | HFLAG_INLINE
+	db "2*"
+	dw HFLAG_INLINE_STRICT | (fword_2star.end - fword_2star)
+fword_2star:
+	SHL A, 1	;	4	4
+	RCL D, 1	;	4	8
+.end:
+	RET
+
+
+
+; 2/ ( x1 -- x2 )
+; : 2/ 1 RSHIFT ;
+fhead_2slash:
+	dp fhead_2star
+	db 2 | HFLAG_INLINE
+	db "2/"
+	dw HFLAG_INLINE_STRICT | (fword_2slash.end - fword_2slash)
+fword_2slash:
+	SHR D, 1	;	4	4
+	RCR A, 1	;	4	8
+.end:
+	RET
+
+
+
+; < ( n1 n2 -- flag )
+; flag is true iff n1 < n2
+fhead_less:
+	dp fhead_2slash
+	db 1
+	db "<"
+fword_less:
+	BPOPW B:C
+	CMP B, D
+	JL .true
+	JG .false
+	CMP C, A
+	JB .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; U< ( u1 u2 -- flag )
+; flag is true iff u1 < u2
+fhead_uless:
+	dp fhead_less
+	db 2
+	db "U<"
+fword_uless:
+	BPOPW B:C
+	CMP B, D
+	JB .true
+	JA .false
+	CMP C, A
+	JB .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; 0< ( n -- flag )
+; flag is true iff n < 0
+fhead_zeroless:
+	dp fhead_uless
+	db 2
+	db "0<"
+fword_zeroless:
+	CMP D, 0
+	JS .true
+	MOVW D:A, FLAG_FALSE
+	RET						
+	
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET	
+
+
+
+; = ( x1 x2 -- flag )
+; flag is true iff x1 = x2
+fhead_equal:
+	dp fhead_zeroless
+	db 1
+	db "="
+fword_equal:
+	BPOPW B:C
+	CMP B, D
+	JNE .false
+	CMP C, A
+	JE .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; 0= ( x -- flag )
+; flag is true iff x = 0
+fhead_zeroequal:
+	dp fhead_equal
+	db 2
+	db "0<"
+fword_zeroequal:
+	CMP D, 0
+	JNE .false
+	CMP A, 0
+	JE .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET						
+	
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; <> ( x1 x2 -- flag )
+; flag is true iff x1 != x2
+fhead_notequal:
+	dp fhead_zeroequal
+	db 2
+	db "<>"
+fword_notequal:
+	BPOPW B:C
+	CMP B, D
+	JNE .true
+	CMP C, A
+	JNE .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; 0<> ( x -- flag )
+; flag is true iff x != 0
+fhead_zeronotequal:
+	dp fhead_notequal
+	db 3
+	db "0<>"
+fword_zeronotequal:
+	CMP D, 0
+	JNE .true
+	CMP A, 0
+	JNE .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET						
+	
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; > ( n1 n2 -- flag )
+; flag is true iff n1 > n2
+fhead_greater:
+	dp fhead_zeronotequal
+	db 1
+	db ">"
+fword_greater:
+	BPOPW B:C
+	CMP B, D
+	JG .true
+	JL .false
+	CMP C, A
+	JA .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; U> ( u1 u2 -- flag )
+; flag is true iff u1 > u2
+fhead_ugreater:
+	dp fhead_greater
+	db 2
+	db "U>"
+fword_ugreater:
+	BPOPW B:C
+	CMP B, D
+	JA .true
+	JB .false
+	CMP C, A
+	JA .true
+
+.false:
+	MOVW D:A, FLAG_FALSE
+	RET
+
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; 0> ( n -- flag )
+; flag is true iff n > 0
+fhead_zerogreater:
+	dp fhead_ugreater
+	db 2
+	db "0>"
+fword_zerogreater:
+	CMP D, 0
+	JNS .true
+	MOVW D:A, FLAG_FALSE
+	RET						
+	
+.true:
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; RECURSE ( -- )
+; Recursion
+fhead_recurse:
+	dp fhead_zerogreater
+	db 7 | HFLAG_IMMEDIATE
+	db "RECURSE"
+fword_recurse:
+	BPUSHW D:A
+	MOVW D:A, fhead_recurse
+	CALL fword_compile_only
+	
+	; Compile:
+	; CALL <self>
+	PUSHW D:A
+	PUSHW L:K
+	
+	MOVW J:I, [uvar_latest]			; J:I = current definition body = value
+	CALL kernel_get_body
+	
+	MOV A, 0x01_3B					; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4			; CALL i32, n/a, CALL i16, CALL i8
+	MOVW L:K, [uvar_here]			; destination
+	CALL kernel_compile_number		; L:K = HERE
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+
+
+; EXIT ( -- ) ( R: nest-sys -- )
+; Return from current definition
+fhead_exit:
+	dp fhead_recurse
+	db 4 | HFLAG_IMMEDIATE
+	db "EXIT"
+fword_exit:
+	BPUSHW D:A
+	MOVW D:A, fhead_exit
+	CALL fword_compile_only
+	
+	; Remove locals without taking them out of scope
+	MOV CL, [uvar_locals_count]
+	CALL kernel_compile_remove_locals
+	
+	; Compile RET
+	MOV CL, 0xE0	; RET
+	MOV [J:I], CL
+	
+	INC I
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+	
+
+
+
+; AHEAD
+; CT: ( C: -- orig )
+;	Create unresolved forward reference orig
+; RT: ( -- )
+;	branch to resolution of orig
+fhead_ahead:
+	dp fhead_exit
+	db 5 | HFLAG_IMMEDIATE
+	db "AHEAD"
+fword_ahead:
+	BPUSHW D:A
+	MOVW D:A, fhead_ahead
+	CALL fword_compile_only
+
+	; Compile:
+	; JMP i16
+	MOVW J:I, [uvar_here]
+	MOV CL, 0xDB	; JMP i16
+	MOV [J:I], CL
+	
+	INC I			; get orig address
+	ICC J
+	
+	BPUSHW D:A		; push orig
+	BPUSHW J:I
+	MOVW D:A, [uvar_locals_count]
+	
+	ADD I, 2		; update HERE
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+
+
+; THEN
+; CT: ( C: orig -- )
+;	Resolve forward reference orig
+; RT: ( -- )
+;	Continue execution
+fhead_then:
+	dp fhead_ahead
+	db 4 | HFLAG_IMMEDIATE
+	db "THEN"
+fword_then:
+	BPUSHW D:A
+	MOVW D:A, fhead_then
+	CALL fword_compile_only
+	
+	; correct locals
+	MOV CL, [uvar_locals_count]	; current number
+	SUB CL, AL					; current - expected = remove
+	CALL kernel_remove_locals
+	
+	; resolve reference
+	PUSHW L:K
+	
+	BPOPW L:K		; destination
+	MOV A, 0x00_32	; no prefix, compute, 2 bytes allowed
+	MOVW J:I, [uvar_here]
+	CALL kernel_compile_number
+	CMP C, 0
+	JZ .out_of_range
+	
+	POPW L:K
+	BPOPW D:A
+	RET
+
+.out_of_range:
+	BPUSHW D:A
+	MOVW D:A, TCODE_OUT_OF_RANGE
+	JMP fword_throw
+
+
+
+; IF
+; CT: ( C: -- orig )
+; 	Create unresolved forward reference orig
+; RT: ( x -- )
+; 	If x = 0, branch to resolution of orig
+fhead_if:
+	dp fhead_then
+	db 2 | HFLAG_IMMEDIATE
+	db "IF"
+fword_if:
+	BPUSHW D:A
+	MOVW D:A, fhead_if
+	CALL fword_compile_only
+	
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JNE .inline
+	
+.noinline:
+	; Compile:
+	;	CALL .do_if
+	;	dw offset
+	PUSHW D:A
+	PUSHW L:K
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_if
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	MOVW J:I, L:K
+	
+	POPW L:K
+	POPW D:A
+	JMP .done
+	
+.inline:
+	; Compile:
+	;	CMP D, 0	;	2	2
+	;	JNZ .nz		;	2	4
+	;	CMP A, 0	;	2	6
+	;.nz:
+	;	BPOPW D:A	;	2	8
+	;	JZ i16		;	4	12
+	MOVW J:I, [uvar_here]
+	MOVW B:C, 0x02_F2_18_6E	; CMP D, 0; JNZ 2
+	MOVW [J:I], B:C
+	MOVW B:C, 0x00_57_00_6E	; CMP A, 0; BPOPW D:A
+	MOVW [J:I + 4], B:C
+	MOV C, 0x40_F1			; JZ i16
+	MOVW [J:I + 8], C
+	
+	ADD I, 10
+	ICC J
+	
+.done:
+	BPUSHW D:A	; orig
+	BPUSHW J:I
+	MOVW D:A, [uvar_locals_count]
+	
+	ADD I, 2	; HERE
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+	; do the action of IF
+.do_if:
+	POPW J:I		; J:I = return address
+	MOV C, [J:I]	; C = offset
+	ADD I, 2
+	ICC J
+	
+	CMP D, 0
+	JNZ .do_if_nz
+	CMP A, 0
+	JNZ .do_if_nz
+	
+	LEA J:I, [J:I + C]	; add offset to return address
+
+.do_if_nz:
+	JMPA J:I		; return
+
+
+
+; ELSE
+; CT: ( C: orig1 -- orig2 )
+;	Resolve orig1 after RT semantics. Replace with orig2
+; RT: ( -- )
+;	Branch to resolution of orig2
+fhead_else:
+	dp fhead_if
+	db 4 | HFLAG_IMMEDIATE
+	db "ELSE"
+fword_else:
+	BPUSHW D:A
+	MOVW D:A, fhead_else
+	CALL fword_compile_only
+	
+	; correct locals
+	MOV CL, [uvar_locals_count]
+	SUB CL, AL
+	CALL kernel_remove_locals
+	
+	PUSHW D:A
+	PUSHW L:K
+	
+	; Compile:
+	;	JMP i16
+	MOVW L:K, [uvar_here]
+	MOV CL, 0xDB	; JMP i16
+	MOV [L:K], CL
+	
+	INC K			; orig2 address
+	ICC L
+	
+	; resolve reference
+	LEA J:I, [L:K + 2]	; J:I = orig1 target = value = HERE
+	MOVW [uvar_here], J:I
+	XCHGW L:K, [BP]		; replace orig1 with orig2, L:K = orig1 address = destination
+	MOV A, 0x00_32		; no prefix, compute, 2 bytes allowed
+	CALL kernel_compile_number
+	CMP C, 0
+	JZ .out_of_range
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+.out_of_range:
+	BPUSHW D:A
+	MOVW D:A, TCODE_OUT_OF_RANGE
 	JMP fword_throw
