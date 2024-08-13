@@ -6,6 +6,7 @@
 	- [Facility](/facility/)
 	- [Locals](/locals/)
 		- [\{](/locals/lbrace.md)
+		- [CORRECT-LOCALS](/locals/correct_locals.md)
 	- [Tools](/tools/)
 	- [Custom](/custom/)
 - Dev

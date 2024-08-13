@@ -144,7 +144,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_else
+%define DICT_LATEST fhead_unloop
 
 
 
@@ -4263,10 +4263,62 @@ fword_zerogreater:
 
 
 
+; CORRECT-LOCALS CT: ( C: u -- )
+; Remove locals from the locals dictionary such that u locals remain, compiling code to remove the
+; same number from the locals stack
+fhead_correct_locals:
+	dp fhead_zerogreater
+	db 14 | HFLAG_IMMEDIATE
+	db "CORRECT-LOCALS"
+fword_correct_locals:
+	BPUSHW D:A
+	MOVW D:A, fhead_correct_locals
+	CALL fword_compile_only
+	
+	MOV CL, [uvar_locals_count]
+	SUB CL, AL
+	CALL kernel_remove_locals
+	
+	BPOPW D:A
+	RET
+
+
+
+; RESOLVE-BRANCH CT: ( C: addr -- )
+; Resolve branch addr to HERE
+fhead_resolve_branch:
+	dp fhead_correct_locals
+	db 14 | HFLAG_IMMEDIATE
+	db "RESOLVE-BRANCH"
+fword_resolve_branch:
+	BPUSHW D:A
+	MOVW D:A, fhead_resolve_branch
+	CALL fword_compile_only
+	
+	PUSHW L:K
+	
+	MOVW L:K, D:A	; destination
+	MOV A, 0x00_32	; no prefix, compute, 2 bytes allowed
+	MOVW J:I, [uvar_here]
+	CALL kernel_compile_number
+	CMP C, 0
+	JZ .out_of_range
+	
+	POPW L:K
+	BPOPW D:A
+	RET
+
+.out_of_range:
+	BPUSHW D:A
+	MOVW D:A, TCODE_OUT_OF_RANGE
+	JMP fword_throw
+
+
+
 ; RECURSE ( -- )
 ; Recursion
 fhead_recurse:
-	dp fhead_zerogreater
+	dp fhead_resolve_branch
 	db 7 | HFLAG_IMMEDIATE
 	db "RECURSE"
 fword_recurse:
@@ -4317,7 +4369,6 @@ fword_exit:
 	ICC J
 	MOVW [uvar_here], J:I
 	RET
-	
 
 
 
@@ -4368,30 +4419,9 @@ fword_then:
 	BPUSHW D:A
 	MOVW D:A, fhead_then
 	CALL fword_compile_only
-	
-	; correct locals
-	MOV CL, [uvar_locals_count]	; current number
-	SUB CL, AL					; current - expected = remove
-	CALL kernel_remove_locals
-	
-	; resolve reference
-	PUSHW L:K
-	
-	BPOPW L:K		; destination
-	MOV A, 0x00_32	; no prefix, compute, 2 bytes allowed
-	MOVW J:I, [uvar_here]
-	CALL kernel_compile_number
-	CMP C, 0
-	JZ .out_of_range
-	
-	POPW L:K
-	BPOPW D:A
+	CALL fword_correct_locals
+	CALL fword_resolve_branch
 	RET
-
-.out_of_range:
-	BPUSHW D:A
-	MOVW D:A, TCODE_OUT_OF_RANGE
-	JMP fword_throw
 
 
 
@@ -4494,9 +4524,8 @@ fword_else:
 	CALL fword_compile_only
 	
 	; correct locals
-	MOV CL, [uvar_locals_count]
-	SUB CL, AL
-	CALL kernel_remove_locals
+	BPUSHW D:A
+	CALL fword_correct_locals
 	
 	PUSHW D:A
 	PUSHW L:K
@@ -4526,4 +4555,474 @@ fword_else:
 .out_of_range:
 	BPUSHW D:A
 	MOVW D:A, TCODE_OUT_OF_RANGE
+	JMP fword_throw
+
+
+
+; DO 
+; CT: ( C: -- do-sys )
+;	Create do-sys. 
+; RT: ( x1 x2 -- ) ( R: -- loop-sys )
+;	Create loop-sys with index x2 and limit x1. 
+fhead_do:
+	dp fhead_else
+	db 2 | HFLAG_IMMEDIATE
+	db "DO"
+fword_do:
+	BPUSHW D:A
+	MOVW D:A, fhead_do
+	CALL fword_compile_only
+	
+	; inline?
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JNE .inline
+
+.noinline:
+	; Compile:
+	; CALL .do_do			;	2-5	2-5
+	; dp <leave address>	;	4	6-9
+	PUSHW D:A
+	PUSHW L:K
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_do
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	MOVW B:C, L:K		; B:C = LEAVE pointer
+	LEA J:I, [L:K + 4]	; J:I = loop start = HERE
+	
+	POPW L:K
+	POPW D:A
+	JMP .done
+	
+.inline:
+	; Compile:
+	; PUSHW <leave address>		;	5	5	LEAVE address
+	; PUSHW L:K					;	2	7	Locals stack ptr
+	; BPOPW B:C					;	2	9	Limit
+	; PUSHW B:C					;	2	11
+	; PUSHW D:A					;	2	13	Index
+	; BPOPW D:A					;	2	15	Pop
+	MOVW J:I, [uvar_here]	; HERE
+	LEA B:C, [J:I + 1]		; save LEAVE pointer
+	PUSHW B:C
+	
+	MOVW B:C, 0x00_00_00_58	; PUSHW i32
+	MOVW [J:I], B:C
+	MOV C, 0x05_51			; PUSHW L:K
+	MOV [J:I + 5], C
+	MOVW B:C, 0x02_51_10_57	; BPOPW B:C; PUSHW B:C
+	MOVW [J:I + 7], B:C
+	MOVW B:C, 0x00_57_00_51	; PUSHW D:A; BPOPW D:A
+	MOVW [J:I + 11], B:C
+	
+	ADD I, 15	; new HERE
+	ICC J
+	POPW B:C	; LEAVE pointer
+
+.done:
+	; B:C = LEAVE pointer
+	; J:I = Loop start = HERE
+	MOVW [uvar_here], J:I
+	
+	BPUSHW D:A
+	BPUSHW B:C	; LEAVE pointer
+	BPUSHW J:I	; Loop start
+	MOVW D:A, [uvar_locals_count]
+	RET
+
+	; Runtime action
+.do_do:
+	POPW J:I		; return address
+	PUSHW ptr [J:I]	; LEAVE address
+	ADD I, 4
+	ICC J
+	
+	PUSHW L:K	; Locals stack ptr
+	BPOPW B:C	; Limit
+	PUSHW B:C
+	PUSHW D:A	; Index
+	BPOPW D:A	; Pop
+	
+	JMPA J:I	; return
+
+
+
+; ?DO
+; CT: ( C: -- do-sys )
+;	Create do-sys
+; RT: ( x1 x2 -- ) ( R: -- loop-sys )
+;	If x1 = x2, branch to do-sys consumer. 
+fhead_qdo:
+	dp fhead_do
+	db 3 | HFLAG_IMMEDIATE
+	db "?DO"
+fword_qdo:
+	BPUSHW D:A
+	MOVW D:A, fhead_qdo
+	CALL fword_compile_only
+	
+	PUSHW L:K
+	
+.noinline:
+	; Compile:
+	; CALL .do_qdo
+	; dp <leave address>
+	BPUSHW D:A
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_qdo
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	MOVW B:C, L:K		; B:C = LEAVE pointer
+	LEA J:I, [L:K + 4]	; J:I = loop start
+	
+	POPW L:K
+	
+	; B:C = LEAVE pointer
+	; J:I = loop start = HERE
+	; L:K = branch pointer
+	MOVW [uvar_here], J:I
+	
+	BPUSHW B:C
+	BPUSHW J:I
+	MOVW D:A, [uvar_locals_count]
+	RET
+
+.do_qdo:
+	POPW J:I		; return address
+	
+	BPOPW B:C	; x1
+	CMP A, C
+	JNE .start_loop
+	CMP D, B
+	JNE .start_loop
+
+.dont_loop:
+	BPOPW D:A
+	JMPA ptr [J:I]	; skip the loop
+
+.start_loop:
+	PUSHW ptr [J:I]	; LEAVE address
+	ADD I, 4		; return address
+	ICC J
+	
+	PUSHW L:K	; Locals stack ptr
+	PUSHW B:C	; limit
+	PUSHW D:A	; index
+	BPOPW D:A	; pop
+	JMPA J:I	; return
+
+
+
+; LOOP
+; CT: ( C: do-sys -- )
+;	Resolve do-sys
+; RT: ( -- ) ( R: loop-sys1 -- | loop-sys2 )
+;	Increment loop index. If index = limit, discard parameters. Otherwise, branch to start of loop
+fhead_loop:
+	dp fhead_qdo
+	db 4 | HFLAG_IMMEDIATE
+	db "LOOP"
+fword_loop:
+	BPUSHW D:A
+	MOVW D:A, fhead_loop
+	CALL fword_compile_only
+	
+	; correct locals
+	CALL fword_correct_locals
+	
+	; inline?
+	CMP byte [uvar_inlining_mode], INLINE_MODE_ALWAYS
+	JE .inline
+
+.noinline:
+	; Compile:
+	; CALL .do_loop		;	2-5	2-5
+	; dw offset			;	2	4-7
+	PUSHW L:K
+	PUSHW D:A
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_loop
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	MOV A, 0x00_32		; no prefix, compute, 2 bytes allowed
+	POPW J:I			; branch target, L:K is already HERE
+	CALL kernel_compile_number
+	
+	MOVW J:I, L:K	; J:I = HERE
+	
+	POPW L:K
+	JMP .done
+
+.inline:
+	; Compile:
+	; POPW J:I			;	2	2
+	; INC I				;	1	3
+	; ICC J				;	1	4
+	; MOVW B:C, [SP]	;	3	7
+	; PUSHW J:I			;	2	9
+	; CMP C, I			;	2	11
+	; JNE loop_start	;	3-4	14-15
+	; CMP B, J			;	2	16-17
+	; JNE loop_start	;	3-4	19-21
+	PUSHW L:K
+	PUSHW D:A
+	
+	MOVW L:K, [uvar_here]
+	MOVW B:C, 0x7D_B0_20_55	; POPW J:I; INC I; ICC J
+	MOVW [L:K], B:C
+	MOVW B:C, 0x51_38_52_2B	; MOVW B:C, [SP]; PUSHW 
+	MOVW [L:K + 4], B:C
+	MOVW B:C, 0xF3_14_6C_20	; J:I; CMP C, I; JNE rim
+	MOVW [L:K + 8], B:C
+	
+	; first JNE
+	ADD K, 12		; place HERE
+	ICC L
+	MOVW J:I, [SP]	; target loop_start
+	MOV A, 0x01_33	; offset 1; compute; 1, 2 bytes allowed
+	MOV C, 0x40_C0	; rim for i16 and i8
+	CALL kernel_compile_number
+	
+	MOVW  B:C, 0x00_F3_8D_6C	; CMP B, J; JNE rim
+	MOVW [L:K], B:C
+	
+	; second JNE
+	ADD K, 3		; place HERE
+	ICC L
+	POPW J:I		; target loop_start
+	MOV A, 0x01_33	; offset 1; compute; 1, 2 bytes allowed
+	MOV C, 0x40_C0	; rim for i16 and i8
+	CALL kernel_compile_number
+	
+	MOVW J:I, L:K	; J:I = HERE
+	
+	POPW L:K
+
+.done:
+	; J:I = HERE
+	; Compile:
+	; ADD SP, 16
+	MOV C, 0x10_96
+	MOV [J:I], C
+	ADD I, 2
+	ICC J
+	
+	; Resolve LEAVE pointer
+	BPOPW D:A
+	MOVW [D:A], J:I
+	BPOPW D:A
+	
+	MOVW [uvar_here], J:I
+	RET
+
+.do_loop:
+	MOVW B:C, [SP + 4]	; get index
+	MOVW J:I, [SP + 8]	; get limit
+	
+	INC C				; add
+	ICC B
+	
+	CMP C, I			; branch or no?
+	JNE .do_loop_branch
+	CMP B, J
+	JE .do_loop_fall
+
+.do_loop_branch:
+	POPW J:I		; return address
+	MOVW [SP], B:C	; update index
+	
+	MOV C, [J:I]			; offset
+	LEA J:I, [J:I + C + 2]	; branch
+	JMPA J:I
+
+.do_loop_fall:
+	POPW J:I		; return address
+	ADD I, 2
+	ICC J
+	JMPA J:I		; return
+
+
+
+; +LOOP
+; CT: ( C: do-sys -- )
+;	Resolve do-sys
+; RT: ( n -- ) ( R: loop-sys1 -- | loop-sys2 )
+;	Add n to loop index. If the index crossed the boundary between index and (index - 1), discard
+;	parameters. Otherwise, branch to start of loop
+fhead_ploop:
+	dp fhead_loop
+	db 5 | HFLAG_IMMEDIATE
+	db "+LOOP"
+fword_ploop:
+	BPUSHW D:A
+	MOVW D:A, fhead_ploop
+	CALL fword_compile_only
+	
+	; correct locals
+	CALL fword_correct_locals
+	
+	; no inline
+.noinline:
+	; Compile:
+	; CALL .do_ploop
+	; dw offset
+	PUSHW L:K
+	PUSHW D:A
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_ploop
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	MOV A, 0x00_32		; no prefix, compute, 2 bytes allowed
+	POPW J:I			; branch target, L:K is already HERE
+	CALL kernel_compile_number
+	
+	MOVW J:I, L:K	; J:I = HERE
+	
+	POPW L:K
+	
+	; Compile:
+	; ADD SP, 16
+	MOV C, 0x10_96
+	MOV [J:I], C
+	ADD I, 2
+	ICC J
+	
+	; Resolve LEAVE pointer
+	BPOPW D:A
+	MOVW [D:A], J:I
+	BPOPW D:A
+	
+	MOVW [uvar_here], J:I
+	RET
+
+.do_ploop:
+	MOVW B:C, [SP + 4]	; get index
+	MOVW J:I, [SP + 8]	; get limit
+	
+	; determine boundary check
+	CMP B, J
+	JG .index_greater
+	JL .index_less
+	CMP C, I
+	JAE .index_greater
+
+.index_less:
+	; add
+	ADD C, A
+	ADC B, D
+	BPOPW D:A
+	
+	; If index is now greater or equal, fall
+	CMP B, J
+	JG .fall
+	JL .branch
+	CMP C, I
+	JAE .fall
+	JMP .branch
+
+.index_greater:
+	; add
+	ADD C, A
+	ADC B, D
+	BPOPW D:A
+	
+	; If index is now less, fall
+	CMP B, J
+	JG .branch
+	JL .fall
+	CMP C, I
+	JB .fall
+
+.branch:
+	POPW J:I		; return address
+	MOVW [SP], B:C	; update index
+	
+	MOV C, [J:I]			; get offset
+	LEA J:I, [J:I + C + 2]	; branch
+	JMPA J:I
+
+.fall:
+	POPW J:I		; return address
+	ADD I, 2
+	ICC J
+	JMPA J:I		; return
+
+
+
+; I ( -- n ) ( R: loop-sys -- loop-sys )
+; n is a copy of the innermost loop index
+fhead_i:
+	dp fhead_ploop
+	db 1 | HFLAG_INLINE
+	db "I"
+	dw HFLAG_INLINE_ALWAYS | (fword_i.end - fword_i)
+fword_i:
+	BPUSHW D:A		;	2	2
+	MOVW D:A, [SP]	;	3	5
+.end:
+	BPUSHW D:A	; doesn't work if not inline
+	MOVW D:A, TCODE_COMPILE_ONLY
+	JMP fword_throw
+
+
+
+; J ( -- n ) ( R: loop-sys1 loop-sys2 -- loop-sys2 )
+; n is a copy of the next-outer loop index
+fhead_j:
+	dp fhead_i
+	db 1 | HFLAG_INLINE
+	db "J"
+	dw HFLAG_INLINE_ALWAYS | (fword_j.end - fword_j)
+fword_j:
+	BPUSHW D:A			;	2	2
+	MOVW D:A, [SP + 16]	;	4	6
+.end:
+	BPUSHW D:A	; doesn't work if not inline
+	MOVW D:A, TCODE_COMPILE_ONLY
+	JMP fword_throw
+
+
+
+; LEAVE ( -- ) ( R: loop-sys -- )
+; Discard loop-sys and branch to outside its loop
+fhead_leave:
+	dp fhead_j
+	db 5 | HFLAG_INLINE
+	db "LEAVE"
+	dw HFLAG_INLINE_ALWAYS | (fword_leave.end - fword_leave)
+fword_leave:
+	ADD SP, 8	;	2	2	Discard index & limit
+	POPW L:K	;	2	4	Pop locals stack ptr
+	RET			;	1	5	Pop & branch to LEAVE ptr
+.end:
+	BPUSHW D:A	; doesn't work if not inline
+	MOVW D:A, TCODE_COMPILE_ONLY
+	JMP fword_throw
+
+
+
+; UNLOOP ( -- ) ( R: loop-sys -- )
+; Discard loop-sys such that EXIT can be called
+fhead_unloop:
+	dp fhead_leave
+	db 6 | HFLAG_INLINE
+	db "UNLOOP"
+	dw HFLAG_INLINE_ALWAYS | (fword_unloop.end - fword_unloop)
+fword_unloop:
+	ADD SP, 16	;	2	2	Discard all. EXIT will take care of L:K
+.end:
+	BPUSHW D:A	; doesn't work if not inline
+	MOVW D:A, TCODE_COMPILE_ONLY
 	JMP fword_throw

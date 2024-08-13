@@ -7,6 +7,7 @@
  * ! (STORE)
  * \+ (PLUS)
  * +! (PSTORE)
+ * +LOOP (PLOOP)
  * \- (MINUS)
  * ( (PAREN)
  * [ (LBRACKET)
@@ -17,6 +18,7 @@
  * \<\> (NOTEQUAL)
  * \> (GREATER)
  * \>R (TOR)
+ * ?DO (QDO)
  * ?DUP (QDUP)
  * 0= (ZEROEQUAL)
  * 0< (ZEROLESS)
@@ -46,6 +48,7 @@
  * CHAR+ (CHARP)
  * CR
  * DECIMAL
+ * DO
  * DROP
  * DUP
  * ELSE
@@ -53,8 +56,12 @@
  * EXIT
  * FALSE
  * HEX
+ * I
  * IF
  * INVERT
+ * J
+ * LEAVE
+ * LOOP
  * LSHIFT
  * MAX
  * MIN
@@ -77,4 +84,5 @@
  * U. (UDOT)
  * U\< (ULESS)
  * U\> (UGREATER)
+ * UNLOOP
  * XOR

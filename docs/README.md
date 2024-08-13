@@ -14,3 +14,7 @@
 
 ## Development Documentation
  * [Kernel Functions](/kernel/)
+
+## Links
+ * [Forth Standard](https://forth-standard.org/standard/words)
+ * [Github](https://github.com/MechaFinch/NST-Forth)

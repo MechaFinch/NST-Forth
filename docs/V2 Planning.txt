@@ -53,7 +53,9 @@ Name				5		n		Word name
 Name			Field Name		Offset	Size	Description
 colon-sys		Header			0		4		Points to word header
 
-do-sys
+do-sys			Locals Count	0		4		Number of locals at DO
+				Loop Start		4		4		Address to branch to from LOOP, +LOOP
+				LEAVE Pointer	8		4		Address to place LEAVE branch address
 
 case-sys
 
@@ -65,7 +67,10 @@ orig			Locals Count	0		4		Number of locals at origin
 dest			Locals Count	0		4		Number of locals at destination
 				Target Address	4		4		Address to branch to
 
-loop-sys
+loop-sys		Index			0		4		Current index
+				Limit			4		4		Limit
+				Locals			8		4		Locals stack pointer at DO
+				LEAVE Address	12		4		Address jumped to by LEAVE
 				
 nest-sys		Return Pointer	0		4		Value from CALL
 

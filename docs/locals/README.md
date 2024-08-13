@@ -21,4 +21,5 @@
  Aside from value-vs-variable, types currently have no effect.
  
  * [\{](/locals/lbrace.md)
+ * [CORRECT-LOCALS](/locals/correct_locals.md)
  
