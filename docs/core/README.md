@@ -39,8 +39,10 @@
  * 2SWAP
  * ABORT
  * ABS
+ * AGAIN
  * AND
  * BASE
+ * BEGIN
  * C@ (CFETCH)
  * C, (CCOMMA)
  * C! (CSTORE)
@@ -72,8 +74,10 @@
  * R> (RFROM)
  * RECURSE
  * REFILL
+ * REPEAT
  * RSHIFT
  * ROT
+ * QUIT
  * SPACE
  * SPACES
  * STATE
@@ -85,4 +89,6 @@
  * U\< (ULESS)
  * U\> (UGREATER)
  * UNLOOP
+ * UNTIL
+ * WHILE
  * XOR

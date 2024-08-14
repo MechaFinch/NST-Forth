@@ -144,7 +144,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_unloop
+%define DICT_LATEST fhead_repeat
 
 
 
@@ -463,7 +463,7 @@ kernel_search_dict:
 	;		loop
 .loop:
 	MOV BL, [J:I + 4]		; get length/flags
-	TST CL, HFLAG_SMUDGE	; is it smudged?
+	TST BL, HFLAG_SMUDGE	; is it smudged?
 	JNZ .next
 	
 	AND BL, HMASK_LENGTH	; does it match?
@@ -1564,6 +1564,7 @@ kernel_compile_remove_locals:
 	; ADD K, bytes
 	; ICC L
 	MOV CH, CL
+	SHL CH, 2
 	MOV CL, 0x76
 	MOV [J:I], C
 	
@@ -1580,12 +1581,16 @@ kernel_compile_remove_locals:
 
 
 ; remove_locals
-; Removes the given number of locals, and compiles code to remove them from the locals stack
+; If n is positive, removes n locals from the locals dictionary, and compiles code to remove n
+; locals from the locals stack.
+; If n is zero, does nothing
+; If n is negative, throws an exception
 ; Arguments CL = n
 ; Clobbers B, CH, J:I
 kernel_remove_locals:
 	CMP CL, 0
 	JE .fret
+	JL .oob
 	
 	; compile removal
 	PUSH CL
@@ -1625,9 +1630,13 @@ kernel_remove_locals:
 	DEC CH
 	JNZ .dec_offs_loop
 	
-
 .fret:
 	RET
+
+.oob:
+	BPUSHW D:A
+	MOVW D:A, TCODE_MALFORMED_LOCALS
+	JMP fword_throw
 
 
 
@@ -1767,6 +1776,31 @@ kernel_get_body:
 	AND BL, HMASK_LENGTH
 	LEA J:I, [J:I + B + 5]	; header -> body
 	RET
+
+
+
+; do_zero_branch
+; Does the action of ZEROBRANCH
+; Pop TOS
+; If TOS was 0, branch with 16 bit offset at return address
+; Otherwise, skip offset to return
+kernel_do_zero_branch:
+	POPW J:I		; return address
+	MOV C, [J:I]	; offset
+	ADD I, 2
+	ICC J
+	
+	CMP D, 0
+	JNZ .nz
+	CMP A, 0
+	JNZ .nz
+
+.z:
+	LEA J:I, [J:I + C]	; add offset to branch
+
+.nz:
+	BPOPW D:A
+	JMPA J:I
 
 
 
@@ -2966,10 +3000,10 @@ fhead_2tor:
 	db "2>R"
 	dw HFLAG_INLINE_ALWAYS | (fword_2tor.end - fword_2tor)
 fword_2tor:
-	PUSHW ptr [BP]	;	3	3
-	PUSHW D:A		;	2	5
-	ADD BP, 4		;	2	7
-	BPOPW D:A		;	2	9
+	BPOPW B:C	;	2	2
+	PUSHW B:C	;	2	4
+	PUSHW D:A	;	2	6
+	BPOPW D:A	;	2	8
 .end:
 	BPUSHW D:A	; doesn't work if not inline
 	MOVW D:A, TCODE_COMPILE_ONLY
@@ -3004,8 +3038,7 @@ fhead_2rfetch:
 fword_2rfetch:
 	BPUSHW D:A			;	2	2
 	MOVW D:A, [SP]		;	3	5
-	MOVW B:C, [SP + 4]	;	4	9
-	BPUSHW B:C			;	2	11
+	BPUSHW ptr [SP + 4]	;	4	9
 .end:
 	BPUSHW D:A	; doesn't work if not inline
 	MOVW D:A, TCODE_COMPILE_ONLY
@@ -3101,9 +3134,8 @@ fhead_store:
 	db "!"
 	dw HFLAG_INLINE_STRICT | (fword_store.end - fword_store)
 fword_store:
-	BPOPW B:C		;	2	2
-	MOVW [D:A], B:C	;	3	5
-	BPOPW D:A		;	2	7
+	BPOPW ptr [D:A]		;	3	3
+	BPOPW D:A			;	2	5
 .end:
 	RET
 
@@ -3163,14 +3195,14 @@ fword_cstore:
 ; Store cell pair x1 x2 at a-addr. x1 -> high cell
 fhead_2store:
 	dp fhead_cstore
-	db 2
+	db 2 | HFLAG_INLINE
 	db "2!"
+	dw HFLAG_INLINE_STRICT | (fword_2store.end - fword_2store)
 fword_2store:
-	BPOPW B:C
-	BPOPW J:I
-	MOVW [D:A], B:C
-	MOVW [D:A + 4], J:I
-	BPOPW D:A
+	BPOPW ptr [D:A]		;	3	3
+	BPOPW ptr [D:A + 4]	;	3	6
+	BPOPW D:A			;	2	8
+.end:
 	RET
 
 
@@ -3439,10 +3471,36 @@ fword_state:
 
 
 
+; HERE ( -- addr )
+; addr is the data space pointer
+fhead_here:
+	dp fhead_state
+	db 4
+	db "HERE"
+fword_here:
+	BPUSHW D:A
+	MOVW D:A, [uvar_here]
+	RET
+
+
+
+; LATEST ( -- addr )
+; addr points to the latest nt
+fhead_latest:
+	dp fhead_here
+	db 6
+	db "LATEST"
+fword_latest:
+	BPUSHW D:A
+	MOVW D:A, uvar_latest
+	RET
+
+
+
 ; BASE ( -- a-addr)
 ; Gets the address of the BASE variable
 fhead_base:
-	dp fhead_state
+	dp fhead_latest
 	db 4
 	db "BASE"
 fword_base:
@@ -4284,8 +4342,8 @@ fword_correct_locals:
 
 
 
-; RESOLVE-BRANCH CT: ( C: addr -- )
-; Resolve branch addr to HERE
+; RESOLVE-BRANCH CT: ( C: addr-from addr-to -- )
+; Resolve branch at addr-from to branch to addr-to
 fhead_resolve_branch:
 	dp fhead_correct_locals
 	db 14 | HFLAG_IMMEDIATE
@@ -4297,9 +4355,9 @@ fword_resolve_branch:
 	
 	PUSHW L:K
 	
-	MOVW L:K, D:A	; destination
+	MOVW J:I, D:A	; to
+	BPOPW L:K		; from
 	MOV A, 0x00_32	; no prefix, compute, 2 bytes allowed
-	MOVW J:I, [uvar_here]
 	CALL kernel_compile_number
 	CMP C, 0
 	JZ .out_of_range
@@ -4315,10 +4373,24 @@ fword_resolve_branch:
 
 
 
+; RESOLVE-BRANCH-HERE CT: ( C: addr-from -- )
+; Resolve branch at addr-from to branch to HERE
+fhead_resolve_branch_here:
+	dp fhead_resolve_branch
+	db 19 | HFLAG_IMMEDIATE
+	db "RESOLVE-BRANCH-HERE"
+fword_resolve_branch_here:
+	BPUSHW D:A
+	MOVW D:A, [uvar_here]
+	CALL fword_resolve_branch
+	RET
+
+
+
 ; RECURSE ( -- )
 ; Recursion
 fhead_recurse:
-	dp fhead_resolve_branch
+	dp fhead_resolve_branch_here
 	db 7 | HFLAG_IMMEDIATE
 	db "RECURSE"
 fword_recurse:
@@ -4420,7 +4492,7 @@ fword_then:
 	MOVW D:A, fhead_then
 	CALL fword_compile_only
 	CALL fword_correct_locals
-	CALL fword_resolve_branch
+	CALL fword_resolve_branch_here
 	RET
 
 
@@ -4444,14 +4516,14 @@ fword_if:
 	
 .noinline:
 	; Compile:
-	;	CALL .do_if
+	;	CALL kernel_do_zero_branch
 	;	dw offset
 	PUSHW D:A
 	PUSHW L:K
 	
 	MOV A, 0x01_3B
 	MOVW B:C, 0xD6_00_D5_D4
-	MOVW J:I, .do_if
+	MOVW J:I, kernel_do_zero_branch
 	MOVW L:K, [uvar_here]
 	CALL kernel_compile_number
 	
@@ -4489,23 +4561,6 @@ fword_if:
 	ICC J
 	MOVW [uvar_here], J:I
 	RET
-
-	; do the action of IF
-.do_if:
-	POPW J:I		; J:I = return address
-	MOV C, [J:I]	; C = offset
-	ADD I, 2
-	ICC J
-	
-	CMP D, 0
-	JNZ .do_if_nz
-	CMP A, 0
-	JNZ .do_if_nz
-	
-	LEA J:I, [J:I + C]	; add offset to return address
-
-.do_if_nz:
-	JMPA J:I		; return
 
 
 
@@ -5026,3 +5081,195 @@ fword_unloop:
 	BPUSHW D:A	; doesn't work if not inline
 	MOVW D:A, TCODE_COMPILE_ONLY
 	JMP fword_throw
+
+
+
+; BEGIN
+; CT: ( C: -- dest );
+;	Create dest
+; RT: ( -- )
+;	Continue execution
+fhead_begin:
+	dp fhead_unloop
+	db 5 | HFLAG_IMMEDIATE
+	db "BEGIN"
+fword_begin:
+	BPUSHW D:A
+	MOVW D:A, fhead_begin
+	CALL fword_compile_only
+	
+	BPUSHW D:A
+	BPUSHW ptr [uvar_here]
+	MOVW D:A, [uvar_locals_count]
+	
+	RET
+
+
+
+; AGAIN
+; CT: ( C: dest -- )
+;	Resolve backwards reference dest
+; RT: ( -- )
+;	Branch to dest
+fhead_again:
+	dp fhead_begin
+	db 5 | HFLAG_IMMEDIATE
+	db "AGAIN"
+fword_again:
+	BPUSHW D:A
+	MOVW D:A, fhead_again
+	CALL fword_compile_only
+	
+	; correct locals
+	CALL fword_correct_locals
+	
+	; Compile:
+	; JMP dest
+	MOVW J:I, [uvar_here]
+	MOV CL, 0xDB	; JMP i16
+	MOV [J:I], CL
+	
+	INC I			; setup for resolve-branch
+	ICC J
+	BPUSHW J:I
+	ADD I, 2		; update HERE
+	ICC J
+	MOVW [uvar_here], J:I
+	
+	CALL fword_resolve_branch
+	RET
+
+
+
+; UNTIL
+; CT: ( C: dest -- )
+;	Resolve dest
+; RT: ( x -- )
+;	If x = 0, continue execution at dest
+fhead_until:
+	dp fhead_again
+	db 5 | HFLAG_IMMEDIATE
+	db "UNTIL"
+fword_until:
+	BPUSHW D:A
+	MOVW D:A, fhead_until
+	CALL fword_compile_only
+	
+	; correct locals
+	CALL fword_correct_locals
+	
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JNE .inline
+	
+.noinline:
+	; Compile:
+	; CALL kernel_do_zero_branch
+	; dw offset
+	PUSHW L:K
+	PUSHW D:A
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, kernel_do_zero_branch
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	POPW D:A	; get TOS back
+	BPUSHW L:K	; put HERE as addr-from
+	PUSHW L:K	; save HERE
+	CALL fword_resolve_branch
+	
+	POPW J:I	; get HERE
+	ADD I, 2
+	ICC J
+	
+	POPW L:K
+	JMP .done
+	
+.inline:
+	; Compile:
+	; CMP D, 0	;	2	2
+	; JNZ .nz	;	2	4
+	; CMP A, 0	;	2	6
+	;.nz:
+	; BPOPW D:A	;	2	8
+	; JZ dest	;	3-4	11-12
+	PUSHW L:K
+	PUSHW D:A
+	
+	MOVW L:K, [uvar_here]
+	MOVW B:C, 0x02_F2_18_6E	; CMP D, 0; JNZ 2
+	MOVW [L:K], B:C
+	MOVW B:C, 0x00_57_00_6E	; CMP A, 0; BPOPW D:A
+	MOVW [L:K + 4], B:C
+	MOV CL, 0xF1			; JZ rim
+	MOV [L:K + 8], CL
+	
+	ADD K, 9
+	ICC L
+	POPW J:I	; target dest
+	MOV A, 0x01_33	; offset 1; compute; 1, 2 bytes allowed
+	MOV C, 0x40_C0	; rim for i16 and i8
+	CALL kernel_compile_number
+	
+	MOVW J:I, L:K	; HERE
+	
+	BPOPW D:A
+	POPW L:K
+
+.done:
+	; J:I = here
+	MOVW [uvar_here], J:I
+	RET
+
+
+
+; WHILE
+; CT: ( C: dest -- orig dest )
+;	Create forward reference orig.
+; RT: ( x -- )
+;	If x = 0, branch to resolution of orig
+fhead_while:
+	dp fhead_until
+	db 5 | HFLAG_IMMEDIATE
+	db "WHILE"
+fword_while:
+	BPUSHW D:A
+	MOVW D:A, fhead_while
+	CALL fword_compile_only
+	
+	BPOPW B:C	; save dest
+	PUSHW B:C
+	PUSHW D:A
+	BPOPW D:A
+	
+	; make IF do the work for us
+	CALL fword_if
+	
+	; restore dest
+	POPW D:A	; Overwrite expected locals count with that of dest
+	BPUSHW D:A	
+	POPW B:C
+	BPUSHW B:C
+	
+	RET
+
+
+
+; REPEAT
+; : REPEAT COMPILE-ONLY POSTPONE AGAIN POSTPONE THEN ; IMMEDIATE
+; CT: ( C: orig dest -- )
+;	Resolve backwards refernce dest. Resolve forward reference orig
+; RT: ( -- )
+;	Branch to dest
+fhead_repeat:
+	dp fhead_while
+	db 6 | HFLAG_IMMEDIATE
+	db "REPEAT"
+fword_repeat:
+	BPUSHW D:A
+	MOVW D:A, fhead_repeat
+	CALL fword_compile_only
+	CALL fword_again
+	CALL fword_then
+	RET

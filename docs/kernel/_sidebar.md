@@ -18,6 +18,7 @@
 		- [create_word](/kernel/create_word.md)
 		- [do_get_local](/kernel/do_get_local.md)
 		- [do_init_locals](/kernel/do_init_locals.md)
+		- [do_zero_branch](/kernel/do_zero_branch.md)
 		- [get_body](/kernel/get_body.md)
 		- [init_locals](/kernel/init_locals.md)
 		- [memcopy](/kernel/memcopy.md)

@@ -16,5 +16,7 @@
 		- [COMPILE-ONLY](/custom/compile_only.md)
 		- [INTERPRET](/custom/interpret.md)
 		- [OSWAP](/custom/oswap.md)
+		- [RESOLVE-BRANCH](/custom/resovle_branch.md)
+		- [RESOLVE-BRANCH-HERE](/custom/resolve_branch_here.md)
 - Dev
 	- [Kernel Functions](/kernel/)
