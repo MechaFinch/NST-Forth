@@ -78,7 +78,7 @@
 ; THROW codes
 %define TCODE_OK					0
 %define TCODE_ABORT					-1
-%define TCODE_ABORTS				-2
+%define TCODE_ABORTQ				-2
 %define TCODE_PSTACK_OVERFLOW		-3
 %define TCODE_PSTACK_UNDERFLOW		-4
 %define TCODE_RSTACK_OVERFLOW		-5
@@ -144,7 +144,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_repeat
+%define DICT_LATEST fhead_endcase
 
 
 
@@ -1556,9 +1556,11 @@ kernel_do_init_locals_4:
 ; Returns J:I = HERE
 ; Clobbers C
 kernel_compile_remove_locals:
-	MOVW J:I, [uvar_here]
 	CMP CL, 0
 	JE .fret
+	JL .oob
+
+	MOVW J:I, [uvar_here]
 	
 	; compile:
 	; ADD K, bytes
@@ -1578,26 +1580,21 @@ kernel_compile_remove_locals:
 .fret:
 	RET
 
+.oob:
+	BPUSHW D:A
+	MOVW D:A, TCODE_MALFORMED_LOCALS
+	JMP fword_throw
 
 
-; remove_locals
-; If n is positive, removes n locals from the locals dictionary, and compiles code to remove n
-; locals from the locals stack.
-; If n is zero, does nothing
-; If n is negative, throws an exception
-; Arguments CL = n
-; Clobbers B, CH, J:I
-kernel_remove_locals:
+
+; dict_remove_locals
+; Removes n locals from the locals dictionary
+kernel_dict_remove_locals:
 	CMP CL, 0
 	JE .fret
 	JL .oob
 	
-	; compile removal
 	PUSH CL
-	CALL kernel_compile_remove_locals
-	
-	; remove locals
-	MOV CL, [SP]
 	MOV CH, CL
 	SHL CH, 2
 	SUB [uvar_locals_size], CH
@@ -1629,6 +1626,36 @@ kernel_remove_locals:
 .dec_offset_loop_check:
 	DEC CH
 	JNZ .dec_offs_loop
+	
+.fret:
+	RET
+
+.oob:
+	BPUSHW D:A
+	MOVW D:A, TCODE_MALFORMED_LOCALS
+	JMP fword_throw
+
+
+
+; remove_locals
+; If n is positive, removes n locals from the locals dictionary, and compiles code to remove n
+; locals from the locals stack.
+; If n is zero, does nothing
+; If n is negative, throws an exception
+; Arguments CL = n
+; Clobbers B, CH, J:I
+kernel_remove_locals:
+	CMP CL, 0
+	JE .fret
+	JL .oob
+	
+	; compile removal
+	PUSH CL
+	CALL kernel_compile_remove_locals
+	
+	; remove locals
+	POP CL
+	CALL kernel_dict_remove_locals
 	
 .fret:
 	RET
@@ -1846,10 +1873,26 @@ fword_refill:
 
 
 
+; ACCEPT ( c-addr +n1 -- +n2 )
+; Recieve a string of at most +n1 characters. +n2 is the length of the recieved string.
+fhead_accept:
+	dp fhead_refill
+	db 6
+	db "ACCEPT"
+fword_accept:
+	MOVW B:C, D:A	; length
+	BPOPW J:I		; buffer
+	MOV A, OS_READ_FILE
+	MOV D, OS_STDIN
+	SYSCALL
+	RET
+
+
+
 ; BYE ( -- )
 ; Exits to OS
 fhead_bye:
-	dp fhead_refill
+	dp fhead_accept
 	db 3
 	db "BYE"
 fword_bye:
@@ -2265,10 +2308,74 @@ fword_throw:
 
 
 
+; ." ( "ccc<quote>" -- )
+; Parse ccc delimited by '"'. If compiling, compile code to display ccc. If interpreting, display ccc.
+fhead_dotq:
+	dp fhead_throw
+	db 2 | HFLAG_IMMEDIATE
+	db '."'
+fword_dotq:
+	; Parse
+	MOV CL, '"'
+	CALL kernel_parse_token
+
+	CMP byte [uvar_state], 0
+	JZ .interpreting
+
+.compiling:
+	; Compile the string
+	CMP CH, 0
+	JNZ .too_long
+	
+	PUSHW D:A
+	PUSHW L:K
+	
+	PUSHW J:I
+	PUSH C
+	
+	; Compile:
+	; CALL kernel_print_inline
+	; db <counted string>
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, kernel_print_inline
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	POP C
+	MOV [L:K], CL
+	INC K
+	ICC L
+	
+	MOVW J:I, L:K		; destination
+	LEA L:K, [L:K + C]	; HERE
+	MOVW [uvar_here], L:K
+	
+	MOVZ A, CL		; length
+	MOV D, 0
+	POPW B:C		; source
+	CALL kernel_memcopy
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+.interpreting:
+	MOV B, 0	; print the string
+	CALL kernel_print_string
+	RET
+
+.too_long:
+	BPUSHW D:A
+	MOVW D:A, TCODE_PARSED_OVERFLOW
+	JMP fword_throw
+
+
+
 ; ABORT ( ? -- ? )
 ; Perform -1 THROW
 fhead_abort:
-	dp fhead_throw
+	dp fhead_dotq
 	db 5
 	db "ABORT"
 fword_abort:
@@ -2278,10 +2385,85 @@ fword_abort:
 
 
 
+; ABORT"
+; CT: ( "ccc<quote>" -- )
+;	Parse ccc delimited by a '"'.
+; RT: ( ? x -- ? )
+;	Pop x. If x != 0, display ccc and ABORT
+fhead_abortq:
+	dp fhead_abort
+	db 6 | HFLAG_IMMEDIATE
+	db 'ABORT"'
+fword_abortq:
+	BPUSHW D:A
+	MOVW D:A, fhead_abortq
+	CALL fword_compile_only
+	
+	CALL fword_if
+	
+	; Parse
+	MOV CL, '"'
+	CALL kernel_parse_token
+
+	; Compile the string
+	CMP CH, 0
+	JNZ .too_long
+	
+	PUSHW D:A
+	PUSHW L:K
+	
+	PUSHW J:I
+	PUSH C
+	
+	; Compile:
+	; CALL .do_abortq
+	; db <counted string>
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_abortq
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	POP C
+	MOV [L:K], CL
+	INC K
+	ICC L
+	
+	MOVW J:I, L:K		; destination
+	LEA L:K, [L:K + C]	; HERE
+	MOVW [uvar_here], L:K
+	
+	MOVZ A, CL		; length
+	MOV D, 0
+	POPW B:C		; source
+	CALL kernel_memcopy
+	
+	POPW L:K
+	POPW D:A
+	
+	CALL fword_then
+	RET
+
+	; action of ABORT"
+.do_abortq:
+	POPW J:I							; counted string addr
+	MOVW [uvar_exceptions_string], J:I	; set string
+	
+	BPUSHW D:A							; -2 THROW
+	MOVW D:A, TCODE_ABORTQ
+	JMP fword_throw
+
+.too_long:
+	BPUSHW D:A
+	MOVW D:A, TCODE_PARSED_OVERFLOW
+	JMP fword_throw
+
+
+
 ; LBRACKET ( -- )
 ; Enter interpretation state
 fhead_lbracket:
-	dp fhead_abort
+	dp fhead_abortq
 	db 1 | HFLAG_IMMEDIATE
 	db "["
 fword_lbracket:
@@ -3322,10 +3504,27 @@ fword_dec:
 
 
 
+; CELLS ( n1 -- n2 )
+; n2 is the size in address units of n1 cells
+fhead_cells:
+	dp fhead_dec
+	db 5 | HFLAG_INLINE
+	db "CELLS"
+	dw (fword_cells.end - fword_cells)
+fword_cells:
+	SHL A, 1	;	4	4
+	RCL D, 1	;	4	8
+	SHL A, 1	;	4	12
+	RCL D, 1	;	4	16
+.end:
+	RET
+
+
+
 ; CELL+ ( a-addr1 -- a-addr2 )
 ; Increment a-addr1 by 1 cell
 fhead_cellp:
-	dp fhead_dec
+	dp fhead_cells
 	db 5 | HFLAG_INLINE
 	db "CELL+"
 	dw HFLAG_INLINE_STRICT | (fword_cellp.end - fword_cellp)
@@ -3337,16 +3536,58 @@ fword_cellp:
 
 
 
+; CHARS ( n1 -- n2 )
+; n2 is the size in address units of n1
+fhead_chars:
+	dp fhead_cellp
+	db 5 | HFLAG_INLINE
+	db "CHARS"
+	dw HFLAG_INLINE_ALWAYS | (fword_chars.end - fword_chars)
+fword_chars:
+	; no-op
+.end:
+	RET
+
+
+
 ; CHAR+ ( x1 -- x2 )
 ; x2 = x1 + 1
 fhead_charp:
-	dp fhead_cellp
+	dp fhead_chars
 	db 5 | HFLAG_INLINE
 	db "CHAR+"
 	dw HFLAG_INLINE_STRICT | (fword_charp.end - fword_charp)
 fword_charp:
 	INC A	;	2	2
 	ICC D	;	1	3
+.end:
+	RET
+
+
+
+; ALIGN ( -- )
+; Align data space pointer
+fhead_align:
+	dp fhead_cellp
+	db 5 | HFLAG_INLINE
+	db "ALIGN"
+	dw HFLAG_INLINE_ALWAYS | (fword_align.end - fword_align)
+fword_align:
+	; no-op
+.end:
+	RET
+
+
+
+; ALIGNED ( addr -- a-addr )
+; a-addr is the next aligned address >= addr
+fhead_aligned:
+	dp fhead_cellp
+	db 7 | HFLAG_INLINE
+	db "ALIGNED"
+	dw HFLAG_INLINE_ALWAYS | (fword_aligned.end - fword_aligned)
+fword_aligned:
+	; no-op
 .end:
 	RET
 
@@ -3497,10 +3738,23 @@ fword_latest:
 
 
 
+; >IN ( -- a-addr )
+; Gets the address of the >IN variable
+fhead_toin:
+	dp fhead_latest
+	db 3
+	db ">IN"
+fword_toin:
+	BPUSHW D:A
+	MOVW D:A, uvar_input_buffer_index
+	RET
+
+
+
 ; BASE ( -- a-addr)
 ; Gets the address of the BASE variable
 fhead_base:
-	dp fhead_latest
+	dp fhead_toin
 	db 4
 	db "BASE"
 fword_base:
@@ -5272,4 +5526,217 @@ fword_repeat:
 	CALL fword_compile_only
 	CALL fword_again
 	CALL fword_then
+	RET
+
+
+
+; CASE
+; CT: ( C: -- case-sys )
+;	Create case-sys
+; RT: ( -- )
+;	Continue execution
+fhead_case:
+	dp fhead_repeat
+	db 4 | HFLAG_IMMEDIATE
+	db "CASE"
+fword_case:
+	BPUSHW D:A
+	MOVW D:A, fword_case
+	CALL fword_compile_only
+	
+	; Create case-sys
+	BPUSHW D:A
+	BPUSHW ptr 0
+	MOVW D:A, [uvar_locals_count]
+	
+	RET
+
+
+
+; OF
+; CT: ( C: -- of-sys )
+;	Create of-sys
+; RT: ( x1 x2 -- | x1 )
+;	If x1 != x1, discard x2 and continue at the consumer of of-sys. Otherwise, discard x1 and x2.
+fhead_of:
+	dp fhead_case
+	db 2 | HFLAG_IMMEDIATE
+	db "OF"
+fword_of:
+	BPUSHW D:A
+	MOVW D:A, fhead_of
+	CALL fword_compile_only
+	
+	BPUSHW D:A	; push
+	
+	CMP byte [uvar_inlining_mode], INLINE_MODE_NEVER
+	JNE .inline
+
+.noinline:
+	; Compile:
+	; CALL .do_of
+	; dw offset
+	PUSHW L:K
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_of
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	BPUSHW L:K			; offset address	
+	LEA J:I, [L:K + 2]	; get HERE
+	
+	POPW L:K
+	JMP .done
+	
+.inline:
+	; Compile:
+	; BPOPW B:C		;	2	2	get x1
+	; CMP A, C		;	2	4
+	; JNE .ne		;	2	6
+	; CMP D, B		;	2	8
+	; .ne:
+	; MOVW D:A, B:C	;	2	10	discard x2
+	; JNE offset	;	4	14
+	; BPOPW D:A		;	2	16
+	MOVW J:I, [uvar_here]
+	MOVW B:C, 0x02_6C_10_57	; BPOPW B:C; CMP A, C
+	MOVW [J:I], B:C
+	MOVW B:C, 0x19_6C_02_F2	; JNE 2; CMP D, B
+	MOVW [J:I + 4], B:C
+	MOVW B:C, 0x40_F3_02_2B	; MOVW D:A, B:C; JNE i16
+	MOVW [J:I + 8], B:C
+	MOV C, 0x00_57			; BPOPW D:A
+	MOV [J:I + 14], C
+	
+	ADD I, 12	; offset address
+	ICC J
+	BPUSHW J:I
+	
+	ADD I, 4	; HERE
+	ICC J
+
+.done:
+	; J:I = HERE
+	MOVW [uvar_here], J:I
+	MOVW D:A, [uvar_locals_count]
+	RET
+
+.do_of:
+	POPW J:I		; return address
+	MOV C, [J:I]
+	ADD I, 2
+	ICC J
+	
+	BPOPW B:C	; get x1
+	CMP A, C
+	JNE .do_of_ne
+	CMP D, B
+	JNE .do_of_ne
+
+.do_of_e:
+	; Discard both & return
+	BPOPW D:A
+	JMPA J:I
+
+.do_of_ne:
+	MOVW D:A, B:C		; discard x2
+	LEA J:I, [J:I + C]	; add offset to branch
+	JMPA J:I
+	
+
+
+
+; ENDOF
+; CT: ( C: case-sys1 of-sys -- case-sys2 )
+;	Resolve of-sys. Include of-sys in case-sys1 to produce case-sys2.
+; RT: ( -- )
+;	Branch to consumer of case-sys2
+fhead_endof:
+	dp fhead_of
+	db 5 | HFLAG_IMMEDIATE
+	db "ENDOF"
+fword_endof:
+	BPUSHW D:A
+	MOVW D:A, fhead_endof
+	CALL fword_compile_only
+	
+	; correct locals
+	MOV CL, [uvar_locals_count]	; Remove locals created in the OF block from the dictionary
+	PUSH CL
+	SUB CL, AL
+	CALL kernel_dict_remove_locals
+	
+	BPOPW D:A			; D:A = OF branch origin
+	
+	POP CL				; Remove locals created after CASE from locals stack
+	SUB CL, [BP]
+	CALL kernel_compile_remove_locals
+	
+	; Compile:
+	; JMP <offset>
+	MOVW J:I, [uvar_here]
+	MOV CL, 0xDB	; JMP i16
+	MOV [J:I], CL
+	INC I			; offset for case-sys
+	ICC J
+	PUSHW J:I
+	ADD I, 2		; HERE
+	ICC J
+	MOVW [uvar_here], J:I
+	
+	; Resolve of-sys
+	CALL fword_resolve_branch_here
+	
+	; Update cases-sys
+	MOVW B:C, [BP]	; OF count
+	POPW ptr [BP]	; saved offset
+	INC C			; update & place OF count
+	ICC B
+	BPUSHW B:C
+	
+	RET
+
+
+; ENDCASE
+; CT: ( C: case-sys -- )
+;	Resolve case-sys
+; RT: ( x -- )
+;	Discard x
+fhead_endcase:
+	dp fhead_endof
+	db 7 | HFLAG_IMMEDIATE
+	db "ENDCASE"
+fword_endcase:
+	BPUSHW D:A
+	MOVW D:A, fhead_endcase
+	CALL fword_compile_only
+	
+	; Compile:
+	; BPOPW D:A
+	MOVW J:I, [uvar_here]
+	MOV C, 0x00_57
+	MOV [J:I], C
+	ADD I, 2
+	ICC J
+	MOVW [uvar_here], J:I
+	
+	; Correct locals
+	CALL fword_correct_locals
+	
+	; Resolve CASE branches
+	MOV I, A	; if there are more than 65535 OFs we have other problems
+	BPOPW D:A
+	INC I
+	JMP .loop_check
+
+.loop:
+	PUSH I
+	CALL fword_resolve_branch_here
+	POP I
+.loop_check:
+	DEC I
+	JNZ .loop
+	
 	RET

@@ -57,12 +57,15 @@ do-sys			Locals Count	0		4		Number of locals at DO
 				Loop Start		4		4		Address to branch to from LOOP, +LOOP
 				LEAVE Pointer	8		4		Address to place LEAVE branch address
 
-case-sys
+case-sys		Locals Count	0		4		Number of locals at CASE
+				OF Count		4		4		Number of OFs
+				OF List			8		4*n		n = OF Count. List of addresses of 16 immediates in ENDOF branches
 
-of-sys
+of-sys			Locals Count	0		4		Number of locals at OF
+				Offset Address	4		4		Address of 16-bit immediate in branch
 
 orig			Locals Count	0		4		Number of locals at origin
-				Jump Address	4		4		Address of 16-bit immediate in branch
+				Offset Address	4		4		Address of 16-bit immediate in branch
 
 dest			Locals Count	0		4		Number of locals at destination
 				Target Address	4		4		Address to branch to

@@ -3,6 +3,7 @@
 
  * @ (FETCH)
  * . (DOT)
+ * ." (DOTQ)
  * , (COMMA)
  * ! (STORE)
  * \+ (PLUS)
@@ -17,6 +18,7 @@
  * \< (LESS)
  * \<\> (NOTEQUAL)
  * \> (GREATER)
+ * \>IN (TOIN)
  * \>R (TOR)
  * ?DO (QDO)
  * ?DUP (QDUP)
@@ -38,7 +40,9 @@
  * 2R> (2RFROM)
  * 2SWAP
  * ABORT
+ * ABORT" (ABORTQ)
  * ABS
+ * ACCEPT
  * AGAIN
  * AND
  * BASE
@@ -46,8 +50,11 @@
  * C@ (CFETCH)
  * C, (CCOMMA)
  * C! (CSTORE)
+ * CASE
  * CELL+ (CELLP)
+ * CELLS
  * CHAR+ (CHARP)
+ * CHARS
  * CR
  * DECIMAL
  * DO
@@ -55,8 +62,11 @@
  * DUP
  * ELSE
  * EMIT
+ * ENDCASE
+ * ENDOF
  * EXIT
  * FALSE
+ * HERE
  * HEX
  * I
  * IF
@@ -68,6 +78,8 @@
  * MAX
  * MIN
  * NEGATE
+ * OF
+ * OR
  * OVER
  * QUIT
  * R@ (RFETCH)

@@ -16,6 +16,7 @@
 		- [convert_number](/kernel/convert_number.md)
 		- [create_local](/kernel/create_local.md)
 		- [create_word](/kernel/create_word.md)
+		- [dict_remove_locals](/kernel/dict_remove_locals.md)
 		- [do_get_local](/kernel/do_get_local.md)
 		- [do_init_locals](/kernel/do_init_locals.md)
 		- [do_zero_branch](/kernel/do_zero_branch.md)
