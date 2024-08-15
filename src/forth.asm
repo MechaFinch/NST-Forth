@@ -144,7 +144,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_endcase
+%define DICT_LATEST fhead_starslash
 
 
 
@@ -2308,67 +2308,219 @@ fword_throw:
 
 
 
-; ." ( "ccc<quote>" -- )
-; Parse ccc delimited by '"'. If compiling, compile code to display ccc. If interpreting, display ccc.
-fhead_dotq:
+; C"
+; CT: ( "ccc<quote>" -- )
+;	Parse ccc delimited by '"'. 
+; RT: ( -- c-addr u )
+;	Return c-addr, a counted string containing ccc
+fhead_cq:
 	dp fhead_throw
 	db 2 | HFLAG_IMMEDIATE
-	db '."'
-fword_dotq:
-	; Parse
+	db 'C"'
+fword_cq:
+	BPUSHW D:A
+	MOVW D:A, fhead_cq
+	CALL fword_compile_only
+	
+	; parse
 	MOV CL, '"'
 	CALL kernel_parse_token
-
-	CMP byte [uvar_state], 0
-	JZ .interpreting
-
-.compiling:
-	; Compile the string
+	
 	CMP CH, 0
 	JNZ .too_long
 	
-	PUSHW D:A
-	PUSHW L:K
-	
-	PUSHW J:I
-	PUSH C
+	PUSHW L:K	; L:K
+	PUSH C		; L:K length
+	PUSHW J:I	; L:K length source
 	
 	; Compile:
-	; CALL kernel_print_inline
-	; db <counted string>
-	MOV A, 0x01_3B
-	MOVW B:C, 0xD6_00_D5_D4
-	MOVW J:I, kernel_print_inline
-	MOVW L:K, [uvar_here]
-	CALL kernel_compile_number
+	; <CALL to jump over string>
+	; <string>
+	; <pop string address>
+	; <push length>
+	MOVW J:I, [uvar_here]	; place CALL i16
+	MOV CL, 0xD5
+	MOV [J:I], CL
 	
-	POP C
-	MOV [L:K], CL
-	INC K
-	ICC L
+	INC I					; branch offset pos
+	ICC J
+	POPW L:K	; L:K length
+	PUSHW J:I	; L:K length branch
+	PUSHW L:K	; L:K length branch source
 	
-	MOVW J:I, L:K		; destination
-	LEA L:K, [L:K + C]	; HERE
+	ADD I, 2				; destination
+	ICC J
+	
+	MOV C, [SP + 8]			; HERE after string
+	
+	MOV [J:I], CL			; count
+	INC I
+	ICC J
+	
+	LEA L:K, [J:I + C]		; string
 	MOVW [uvar_here], L:K
 	
-	MOVZ A, CL		; length
-	MOV D, 0
-	POPW B:C		; source
+	BPUSHW D:A				; save & make room for branch pointer
+	
+	POPW B:C				; source	L:K length branch
+	MOVZ D:A, [SP + 4]		; length
 	CALL kernel_memcopy
 	
+	POPW D:A				; branch to after string
+	ADD SP, 2
+	CALL fword_resolve_branch_here 
+	
+	; Compile:
+	; BPUSHW D:A	;	2	2
+	; POPW D:A		;	2	4
+	MOVW J:I, [uvar_here]
+	MOVW B:C, 0x00_55_00_53	; BPUSHW D:A; POPW D:A
+	MOVW [J:I], B:C
+	ADD I, 4
+	ICC J
+	MOVW [uvar_here], J:I
+	
 	POPW L:K
-	POPW D:A
-	RET
-
-.interpreting:
-	MOV B, 0	; print the string
-	CALL kernel_print_string
 	RET
 
 .too_long:
 	BPUSHW D:A
 	MOVW D:A, TCODE_PARSED_OVERFLOW
 	JMP fword_throw
+
+
+
+; COUNT ( c-addr1 -- c-addr2 u )
+; c-addr2 is the start of counted string c-addr1. u is the length of counted string c-addr1
+fhead_count:
+	dp fhead_cq
+	db 5
+	db "COUNT"
+fword_count:
+	MOVZ C, [D:A]	; get count
+	INC A			; get contents
+	ICC D
+	BPUSHW D:A
+	MOVZ D:A, C		; complete u
+	RET
+
+
+
+; S"
+; CT: ( "ccc<quote>" -- )
+;	Parse ccc delimited by '"'. 
+; RT: ( -- c-addr u )
+;	Return c-addr u describing ccc
+fhead_sq:
+	dp fhead_count
+	db 2 | HFLAG_IMMEDIATE
+	db 'S"'
+fword_sq:
+	BPUSHW D:A
+	MOVW D:A, fhead_sq
+	CALL fword_compile_only
+	
+	; parse
+	MOV CL, '"'
+	CALL kernel_parse_token
+	
+	PUSHW L:K	; L:K
+	PUSH C		; L:K length
+	PUSHW J:I	; L:K length source
+	
+	; Compile:
+	; <CALL to jump over string>
+	; <string>
+	; <pop string address>
+	; <push length>
+	MOVW J:I, [uvar_here]	; place CALL i16
+	MOV CL, 0xD5
+	MOV [J:I], CL
+	
+	INC I					; branch offset pos
+	ICC J
+	POPW L:K	; L:K length
+	PUSHW J:I	; L:K length branch
+	PUSHW L:K	; L:K length branch source
+	
+	ADD I, 2				; destination
+	ICC J
+	
+	MOV C, [SP + 8]			; HERE after string
+	LEA L:K, [J:I + C]
+	MOVW [uvar_here], L:K
+	
+	BPUSHW D:A				; save & make room for branch pointer
+	
+	POPW B:C				; source	L:K length branch
+	MOVZ D:A, [SP + 4]		; length
+	CALL kernel_memcopy
+	
+	POPW D:A				; branch to after string
+	CALL fword_resolve_branch_here
+	
+	; no inlining mode check cause there's a whole string there who cares
+	; Compile:
+	; BPUSHW D:A	;	2	2
+	; SUB BP, 4		;	2	4
+	; POPW ptr [BP]	;	3	7
+	; MOVZ D:A, len	;	4	11
+	MOVW J:I, [uvar_here]
+	MOVW B:C, 0x04_9F_00_53	; BPUSHW D:A; SUB BP, 4
+	MOVW [J:I], B:C
+	MOVW B:C, 0x03_30_46_55	; POPW ptr [BP]; MOVZ rim
+	MOVW [J:I + 4], B:C
+	MOV CL, 0x40			; D:A, i16
+	POP CH
+	MOV [J:I + 8], C
+	POP byte [J:I + 10]
+	ADD I, 11
+	ICC J
+	MOVW [uvar_here], J:I
+	
+	POPW L:K
+	RET
+
+
+
+; ." ( "ccc<quote>" -- )
+; Parse ccc delimited by '"'. If compiling, compile code to display ccc. If interpreting, display ccc.
+fhead_dotq:
+	dp fhead_sq
+	db 2 | HFLAG_IMMEDIATE
+	db '."'
+fword_dotq:
+	CMP byte [uvar_state], 0
+	JZ .interpreting
+
+.compiling:
+	; POSTPONE S" POSTPONE TYPE
+	CALL fword_sq
+	
+	; Compile:
+	; CALL fword_type
+	PUSHW D:A
+	PUSHW L:K
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, fword_type
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+.interpreting:
+	; Parse
+	MOV CL, '"'
+	CALL kernel_parse_token
+	
+	MOV B, 0	; print the string
+	CALL kernel_print_string
+	RET
 
 
 
@@ -5739,4 +5891,428 @@ fword_endcase:
 	DEC I
 	JNZ .loop
 	
+	RET
+
+
+
+; ALLOCATE ( u -- a-addr ior )
+; Allocates u bytes, returning pointer a-addr. ior = 0 if successful.
+fhead_allocate:
+	dp fhead_endcase
+	db 8
+	db "ALLOCATE"
+fword_allocate:
+	MOVW C:D, D:A
+	MOV A, OS_MALLOC
+	SYSCALL
+	
+	BPUSHW D:A
+	MOVW D:A, 0
+	RET
+
+
+
+; FREE ( a-addr -- ior )
+; Free memory region a-addr. ior = 0 if successful
+fhead_free:
+	dp fhead_allocate
+	db 4
+	db "FREE"
+fword_free:
+	MOVW C:D, D:A
+	MOV A, OS_FREE
+	SYSCALL
+	
+	MOVW D:A, 0
+	RET
+
+
+
+; RESIZE ( a-addr1 u -- a-addr2 ior )
+; Resize memory region a-addr1 to be u bytes, returning a-addr2. ior = 0 if successful
+fhead_resize:
+	dp fhead_free
+	db 6
+	db "RESIZE"
+fword_resize:
+	MOVW C:D, D:A
+	MOVW J:I, [BP]
+	MOV A, OS_REALLOC
+	SYSCALL
+	
+	MOVW [BP], D:A
+	MOVW D:A, 0
+	RET
+
+
+
+; S>D ( n -- d )
+; Convert n to d
+fhead_stod:
+	dp fhead_resize
+	db 3 | HFLAG_INLINE
+	db "S>D"
+	dw HFLAG_INLINE_STRICT | (fword_stod.end - fword_stod)
+fword_stod:
+	BPUSHW D:A	;	2	2
+	SAR D, 15	;	4	6	all bits of D:A = sign bit of D
+	MOV A, D	;	1	7
+.end:
+	RET
+
+
+
+; * ( x1 x2 -- x3 (
+; Multiply x1 and x2 to get product x3
+fhead_star:
+	dp fhead_stod
+	db 1
+	db "*"
+fword_star:
+	BPOPW B:C
+	PUSHW B:C
+	PUSHW D:A
+	CALL mutil.mulu32	; low 32 bits in D:A
+	ADD SP, 8
+	RET
+
+
+
+; M* ( n1 n2 -- d )
+; d = n1 * n2
+fhead_mstar:
+	dp fhead_star
+	db 2
+	db "M*"
+fword_mstar:
+	PUSHW ptr [BP]
+	PUSHW D:A
+	CALL mutil.muls32	; B:C = upper, D:A = lower
+	ADD SP, 8
+	
+	MOVW [BP], D:A
+	MOVW D:A, B:C
+	RET
+
+
+
+; UM* ( u1 u2 -- ud )
+fhead_umstar:
+	dp fhead_mstar
+	db 3
+	db "UM*"
+fword_umstar:
+	PUSHW ptr [BP]
+	PUSHW D:A
+	CALL mutil.mulu32	; B:C = upper, D:A = lower
+	ADD SP, 8
+	
+	MOVW [BP], D:A
+	MOVW D:A, B:C
+	RET
+
+
+
+; / ( n1 n2 -- n3 )
+; Divide n1 by n2 giving quotient n3
+; Uses symmetric division
+fhead_slash:
+	dp fhead_umstar
+	db 1
+	db "/"
+fword_slash:
+	PUSHW D:A
+	BPOPW B:C
+	PUSHW B:C
+	CALL mutil.divms32	; D:A = quot, B:C = rem
+	ADD SP, 8
+	RET
+
+
+
+; MOD ( n1 n2 -- n3 )
+; Divide n1 by n2 giving remainder n3
+; Uses symmetric division
+fhead_mod:
+	dp fhead_slash
+	db 3
+	db "MOD"
+fword_mod:
+	PUSHW D:A
+	BPOPW B:C
+	PUSHW B:C
+	CALL mutil.divms32	; D:A = quot, B:C = rem
+	ADD SP, 8
+	MOVW D:A, B:C
+	RET
+
+
+
+; /MOD ( n1 n2 -- n3 n4 )
+; Divide n1 by n2 giving remainder n3 and quotient n4
+fhead_slashmod:
+	dp fhead_mod
+	db 4
+	db "/MOD"
+fword_slashmod:
+	PUSHW D:A
+	BPOPW B:C
+	PUSHW B:C
+	CALL mutil.divms32	; D:A = quot, B:C = rem
+	ADD SP, 8
+	BPUSHW B:C
+	RET
+
+
+
+; UM/MOD ( ud u1 -- u2 u3 )
+; Divide ud by u1 giving remainder u2 and quotient u3
+fhead_umslahsmod:
+	dp fhead_slashmod
+	db 6
+	db "UM/MOD"
+fword_umslashmod:
+	; if ud fits in 32 bits and u1 fits in 16 bits, do natively
+	BPOPW B:C	; B:C = ud high
+	BPOPW J:I	; J:I = ud low
+	
+	CMP D, 0
+	JNZ .long_divide
+	CMP C, 0
+	JNZ .long_divide
+	CMP B, 0
+	JNZ .long_divide
+	
+	; short divide
+	DIVM J:I, A	; J = remainder, I = quotient
+	
+	MOVZ B:C, J
+	BPUSHW B:C
+	MOVZ D:A, I
+	RET
+
+.long_divide:
+	; Algorithm:
+	;	Shift dividend left, rotating into remainder
+	;	If the divisor can be subtracted from the remainder:
+	;		Subtract divisor from remainder
+	;		Shift 1 into quotient
+	;	Otherwise:
+	;		Shift 0 into quotient
+	;	Continue until all dividend bits processed
+	; D:A = quotient
+	; B:C = remainder
+	; J:I = divisor
+	; K = 1 (for shifting memory, +saves immediates)
+	; L:[BP + 4]:[BP + 2]:[BP] = dividend
+	; byte [BP + 6] = bit count
+	PUSHW L:K
+	
+	BPUSH byte 65	; bit count
+	MOV K, 1
+	MOV L, B		; dividend high
+	BPUSH C
+	BPUSHW J:I		; dividend low
+	MOVW J:I, D:A	; divisor
+	MOVW D:A, 0		; quotient
+	MOVW B:C, 0		; remainder
+	
+	; fast loop until first 1 bit of dividend
+.floop:
+	DEC byte [BP + 6]
+	SHL [BP + 0], K
+	RCL [BP + 2], K
+	RCL [BP + 4], K
+	RCL L, K
+	JNC .floop	; 0 shifted -> floop
+	JMP .start
+
+.loop:
+	; shift quotient
+	SHL A, K
+	RCL D, K
+	
+	; shift dividend into remainder
+	SHL [BP + 0], K	; dividend
+	RCL [BP + 2], K
+	RCL [BP + 4], K
+	RCL L, K
+.start:
+	RCL C, K		; remainder
+	RCL B, K
+	
+	; can we subtract?
+	PUSHW B:C
+	
+	SUB C, I
+	SBB B, J
+	JC .no_subtract
+	
+	; we can. discard saved remainder
+	ADD SP, 4
+	
+	; shift 1 into quotient
+	OR A, 1
+	JMP .next
+
+.no_subtract:
+	; we can't. restore saved remainder
+	POPW B:C
+
+.next:
+	; continue until all bits processed
+	DEC byte [BP + 6]
+	JNZ .loop
+	
+	; done
+	ADD BP, 3
+	MOVW [BP], B:C
+	POPW L:K
+	RET
+
+
+
+; SM/REM ( d1 n1 -- n2 n3 )
+; Divide d1 by n1 giving symmetric remainder n2 and quotient n3
+fhead_smslashrem:
+	dp fhead_umslahsmod
+	db 6
+	db "SM/REM"
+fword_smslashrem:
+	; save signs of d1 and n1
+	; BH = sign(d1)
+	; BL = sign(n1)
+	MOV B, 0
+	CMP byte [BP + 3], 0
+	CMOVS BH, 1
+	JNS .correct_n1
+	
+	NOT word [BP + 2]	; negate d1
+	NOT word [BP]
+	NOT word [BP + 6]
+	NEG word [BP + 4]
+	ICC word [BP + 6]
+	ICC word [BP]
+	ICC word [BP + 2]
+
+.correct_n1:
+	CMP DH, 0
+	CMOVS BL, 1
+	JNS .divide
+	
+	NOT D				; negate n1
+	NEG A
+	ICC D
+
+.divide:	; divide
+	PUSH B
+	CALL fword_umslashmod
+	POP B
+	
+	; Correct signs
+	; sign(remainder) = sign(d1)
+	CMP BH, 0
+	JZ .remainder_ok
+	
+	NOT word [BP + 2]
+	NEG word [BP]
+	ICC word [BP + 2]
+
+.remainder_ok:
+	; sign(quotient) = sign(d1) xor sign(n1)
+	XOR BH, BL
+	JZ .quotient_ok
+	
+	NOT D
+	NEG A
+	ICC D
+
+.quotient_ok:
+	RET
+
+
+
+; FM/MOD ( d1 n1 -- n2 n3 )
+; Divide d1 by n1, giving the floored remainder n2 and quotient n3
+fhead_fmslashmod:
+	dp fhead_smslashrem
+	db 6
+	db "FM/MOD"
+fword_fmslashmod:
+	; save divisor
+	PUSHW D:A
+
+	; get signs
+	; BH = sign(d1)
+	; BL = sign(n1)
+	MOV B, 0
+	CMP byte [BP + 3], 0
+	CMOVS BH, 1
+	CMP DH, 0
+	CMOVS BL, 1
+	PUSH B
+	
+	; divide
+	CALL fword_smslashrem
+	
+	; symmetric -> floored
+	; if remainder = 0, no change
+	CMP word [BP], 0
+	JNZ .nonzero
+	CMP word [BP + 2], 0
+	JZ .zero
+
+.nonzero:
+	; if sign(d1) = sign(n1), no change
+	POP B
+	CMP BH, BL
+	JE .signs_same
+	
+	; correction required.
+	DEC A		; quotient -= 1
+	DCC D
+	
+	POPW B:C	; remainder += divisor
+	ADD [BP], C
+	ADC [BP + 2], B
+	RET
+
+.signs_same:
+	ADD SP, 4
+	RET
+
+.zero:
+	ADD SP, 6
+	RET
+
+
+
+; */MOD ( n1 n2 n3 -- n4 n5 )
+; Multiply n1 and n2 producing intermediate result d. Divide d by n3 producing remainder n4 and quotient n5
+; : */MOD >R M* R> SM/MOD ;
+fhead_starslashmod:
+	dp fhead_fmslashmod
+	db 5
+	db "*/MOD"
+fword_starslashmod:
+	PUSHW D:A				; >R
+	BPOPW D:A
+	CALL fword_mstar		; M*
+	BPUSHW D:A				; R>
+	POPW D:A
+	CALL fword_smslashmod	; SM/MOD
+	RET
+
+
+
+; */ ( n1 n2 n3 -- n4 )
+; Multiply n1 and n2 producing intermediate result d. Divide d by n3 giving quotient n4.
+; : */ */MOD NIP ;
+fhead_starslash:
+	dp fhead_starslashmod
+	db 2
+	db "*/"
+fword_starslash:
+	CALL fword_starslashmod	; */MOD
+	ADD BP, 4				; NIP
 	RET

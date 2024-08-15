@@ -5,7 +5,8 @@
 	- [Exception](/exception/)
 	- [Facility](/facility/)
 	- [Locals](/locals/)
-	- [Tools](/exception/)
+	- [Memory](/memory/)
+	- [Tools](/tools/)
 	- [Custom](/custom/)
 - Dev
 	- [Kernel Functions](/kernel/)

@@ -7,6 +7,7 @@
 	- [Locals](/locals/)
 		- [\{](/locals/lbrace.md)
 		- [CORRECT-LOCALS](/locals/correct_locals.md)
+	- [Memory](/memory/)
 	- [Tools](/tools/)
 	- [Custom](/custom/)
 - Dev

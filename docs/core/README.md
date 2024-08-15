@@ -10,9 +10,14 @@
  * +! (PSTORE)
  * +LOOP (PLOOP)
  * \- (MINUS)
+ * \* (STAR)
+ * \*/ (STARSLASH)
+ * \*/MOD (STARSLASHMOD)
  * ( (PAREN)
  * [ (LBRACKET)
  * ] (RBRACKET)
+ * / (SLASH)
+ * /MOD (SLASHMOD)
  * \\ (BACKSLASH)
  * = (EQUAL)
  * \< (LESS)
@@ -31,7 +36,7 @@
  * 2@ (2FETCH)
  * 2! (2STORE)
  * 2>R (2TOR)
- * 2* (2STAR)
+ * 2\* (2STAR)
  * 2/ (2SLASH)
  * 2DROP
  * 2DUP
@@ -50,11 +55,13 @@
  * C@ (CFETCH)
  * C, (CCOMMA)
  * C! (CSTORE)
+ * C" (CQ)
  * CASE
  * CELL+ (CELLP)
  * CELLS
  * CHAR+ (CHARP)
  * CHARS
+ * COUNT
  * CR
  * DECIMAL
  * DO
@@ -66,6 +73,7 @@
  * ENDOF
  * EXIT
  * FALSE
+ * FM/MOD (FMSLASHMOD)
  * HERE
  * HEX
  * I
@@ -75,8 +83,10 @@
  * LEAVE
  * LOOP
  * LSHIFT
+ * M\* (MSTAR)
  * MAX
  * MIN
+ * MOD
  * NEGATE
  * OF
  * OR
@@ -89,7 +99,9 @@
  * REPEAT
  * RSHIFT
  * ROT
- * QUIT
+ * S" (SQ)
+ * S>D (STOD)
+ * SM/REM (SMSLASHREM)
  * SPACE
  * SPACES
  * STATE
@@ -100,6 +112,8 @@
  * U. (UDOT)
  * U\< (ULESS)
  * U\> (UGREATER)
+ * UM\* (UMSTAR)
+ * UM/MOD (UMSLASHMOD)
  * UNLOOP
  * UNTIL
  * WHILE

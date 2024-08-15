@@ -9,6 +9,7 @@
  * [Exception](/exception/)
  * [Facility](/facility/)
  * [Locals](/locals/)
+ * [Memory](/memory/)
  * [Tools](/tools/)
  * [Custom](/custom/)
 
