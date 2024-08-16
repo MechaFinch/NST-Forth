@@ -1,0 +1,43 @@
+
+--
+-- FORTH Interoperability
+-- 
+
+-- Variables
+-- _forth.interop_psp				ptr	Saved parameter stack pointer
+-- _forth.interop_lsp				ptr Saved locals stack pointer
+-- _forth.interop_exception_handler	ptr Function pointer called with u32 THROW code as argument if an exception is
+--										caught by an interop call
+
+-- Init
+-- Initializes the forth environment.
+-- OS must be initialized beforehand
+-- Arguments
+--	param_stack_size	Size of parameter stack, bytes
+--	locals_stack_size	Size of locals stack, bytes
+--	user_dict_size		Size of user dictionary, bytes
+--	user_dict_padding	If HERE reaches (user dict origin + user dict size - user dict padding), overflow is detected
+--	stack_padding		If a stack pointer reaches (origin - size + padding), overflow is detected
+--						If a stack pointer reaches (origin - padding), underflow is detected
+external function _forth.interop_init of u32 param_stack_size, u32 locals_stack_size, u32 user_dict_size, i16 user_dict_padding, i16 stack_padding returns none;
+
+-- Push
+-- Push val onto the parameter stack
+external function _forth.interop_push of u32 val returns none;
+
+-- Pop
+-- Pops a cell off the parameter stack, returning it
+external function _forth.interop_pop of none returns u32;
+
+-- Peek
+-- Returns the top of the parameter stack
+external function _forth.interop_peek of none returns u32;
+
+-- Pointer Call
+-- Call a forth word using its xt
+external function _forth.interop_pcall of ptr xt returns none;
+
+-- Name Call
+-- Call a forth word using its name
+-- Returns a nonzero value if the name could not be found
+external function _forth.interop_ncall of u8 pointer name_ptr, u8 name_len returns u8;

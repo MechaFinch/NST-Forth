@@ -15,14 +15,14 @@
 
 ; 16k locals stack
 %define PARAM_LOCAL_STACK_SIZE 0x0000_4000
-; 8k locals dictionary
-%define PARAM_LOCAL_DICT_SIZE 0x0000_2000
+; 2k locals dictionary
+%define PARAM_LOCAL_DICT_SIZE 0x0000_0800
 ; 128k user dictionary
 %define PARAM_USER_DICT_SIZE 0x0002_0000
 ; 256 character input buffer
 %define PARAM_INPUT_BUFFER_SIZE 128
 
-%define PARAM_USER_DICT_PADDING 1024
+%define PARAM_USER_DICT_PADDING 64
 %define PARAM_LOCAL_DICT_PADDING 64
 %define PARAM_STACK_PADDING 64
 
@@ -95,6 +95,11 @@
 %define TCODE_PARSED_OVERFLOW		-18
 %define TCODE_NAME_TOO_LONG			-19
 
+%define TCODE_UNSUPPORTED			-21
+
+%define TCODE_INVALID_ARG			-24
+%define TCODE_RSTACK_IMBALANCE		-25
+
 %define TCODE_COMPILER_NESTING		-29
 
 %define TCODE_LSTACK_OVERFLOW		-256
@@ -144,7 +149,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_starslash
+%define DICT_LATEST fhead_native_call
 
 
 
@@ -161,50 +166,103 @@ entry:
 	; get OS running
 	CALL os.init
 .start:
+	PUSH word PARAM_STACK_PADDING
+	PUSH word PARAM_USER_DICT_PADDING
+	PUSH ptr PARAM_USER_DICT_SIZE
+	PUSH ptr PARAM_LOCAL_STACK_SIZE
+	PUSH ptr PARAM_PARAM_STACK_SIZE
+	CALL interop_init
 	
-	; User dictionary, 128k
+	; start execution
+	MOVW D:A, 0
+	MOVW L:K, [uvar_locals_stack_origin]
+	MOVW BP, [uvar_param_stack_origin]
+	
+	SUB SP, PARAM_STACK_PADDING
+	LEA B:C, [SP - 4]
+	MOVW [uvar_return_stack_origin], B:C
+	LEA B:C, [SP - (PARAM_RETURN_STACK_SIZE - PARAM_STACK_PADDING)]
+	MOVW [uvar_return_stack_end], B:C
+	
+	CALL fword_quit
+	ADD SP, PARAM_STACK_PADDING
+	
+	JMP entry
+
+
+
+;
+; Interoperability hooks
+; Functions that follow NSTL calling convention to allow interoperability
+;
+
+; Globals to save the stack pointers
+interop_psp:				resp 1
+interop_lsp:				resp 1
+interop_exception_handler:	dp interop_default_handler
+interop_stack_padding:		resw 1
+
+; none interop_init(u32 param_stack_size, u32 locals_stack_size, u32 user_dict_size,
+;					i16 user_dict_padding, i16 stack_padding)
+interop_init:
+	PUSHW BP
+	MOVW BP, SP
+	
+	; Allocate dynamic memory
+	; User dictionary
 	MOV A, OS_MALLOC
-	MOVW C:D, PARAM_USER_DICT_SIZE
+	MOVW C:D, [BP + 16]	; user_dict_size
 	SYSCALL
 	MOVW [uvar_user_dict_origin], D:A
 	MOVW [uvar_here], D:A
-	LEA D:A, [D:A + (PARAM_USER_DICT_SIZE - PARAM_USER_DICT_PADDING)]
+	ADD A, [BP + 16]	; user_dict_size
+	ADC D, [BP + 18]
+	ADD A, [BP + 20]	; user_dict_padding
+	ICC D
 	MOVW [uvar_user_dict_end], D:A
 	
-	; allocate regions of dynamic memory
-	; Locals dictionary, 8k
+	; Locals dictioanry (fixed size)
 	MOV A, OS_MALLOC
 	MOVW C:D, PARAM_LOCAL_DICT_SIZE
 	SYSCALL
 	MOVW [uvar_locals_dict_origin], D:A
 	MOVW [uvar_locals_here], D:A
 	
-	; Parameter stack
+	; Parameter Stack
 	MOV A, OS_MALLOC
-	MOVW C:D, PARAM_PARAM_STACK_SIZE
+	MOVW C:D, [BP + 8]	; param_stack_size
 	SYSCALL
-	LEA D:A, [D:A + PARAM_STACK_PADDING]	; 64 bytes of padding on both ends
+	MOV C, [BP + 22]	; stack_padding
+	MOV [interop_stack_padding], C
+	ADD A, C
+	ICC D
 	MOVW [uvar_param_stack_end], D:A
-	LEA D:A, [D:A + (PARAM_PARAM_STACK_SIZE - (PARAM_STACK_PADDING * 2))]
+	ADD A, [BP + 8]		; param_stack_size
+	ADC D, [BP + 10]
+	LEA D:A, [D:A + 2*C]
 	MOVW [uvar_param_stack_origin], D:A
 	
-	; Locals stack
+	; Locals Stack
 	MOV A, OS_MALLOC
-	MOVW C:D, PARAM_LOCAL_STACK_SIZE
+	MOVW C:D, [BP + 12]	; locals_stack_size
 	SYSCALL
-	LEA D:A, [D:A + PARAM_STACK_PADDING]
+	MOV C, [BP + 22]	; stack_padding
+	ADD A, C
+	ICC D
 	MOVW [uvar_locals_stack_end], D:A
-	LEA D:A, [D:A + (PARAM_LOCAL_STACK_SIZE - (PARAM_STACK_PADDING * 2))]
+	ADD A, [BP + 12]	; locals_stack_size
+	ADC D, [BP + 14]
+	LEA D:A, [D:A + 2*C]
 	MOVW [uvar_locals_stack_origin], D:A
 	
-	; Terminal buffer, 256
+	; Terminal buffer (fixed size)
 	MOV A, OS_MALLOC
 	MOVW C:D, PARAM_INPUT_BUFFER_SIZE
 	MOVW [uvar_term_buffer_size], C:D
 	SYSCALL
 	MOVW [uvar_term_buffer_start], D:A
 	
-	; Reset stufffff
+	; Reset
 	MOVW D:A, DICT_LATEST
 	MOVW [uvar_latest], D:A
 	MOVW [uvar_locals_latest], D:A
@@ -223,21 +281,219 @@ entry:
 	MOVW [uvar_exceptions_string], D:A
 	MOVW [uvar_exceptions_thrower], D:A
 	
-	; start execution
-	MOVW D:A, 0
-	MOVW L:K, [uvar_locals_stack_origin]
-	MOVW BP, [uvar_param_stack_origin]
+	MOVW B:C, [uvar_param_stack_origin]
+	SUB C, 4
+	DCC B
+	MOVW [interop_psp], B:C
+	MOVW B:C, [uvar_locals_stack_origin]
+	MOVW [interop_lsp], B:C
 	
-	SUB SP, PARAM_STACK_PADDING
-	LEA B:C, [SP - 4]
-	MOVW [uvar_return_stack_origin], B:C
-	LEA B:C, [SP - (PARAM_RETURN_STACK_SIZE - PARAM_STACK_PADDING)]
-	MOVW [uvar_return_stack_end], B:C
+	POPW BP
+	RET
+
+
+
+; default_handler
+interop_default_handler:
+	PUSHW BP
+	MOVW BP, SP
 	
-	CALL fword_quit
-	ADD SP, PARAM_STACK_PADDING
+	PUSHW D:A
 	
-	JMP entry
+	CALL fword_page
+	CALL kernel_print_inline
+	db 46, "Uncaught exception during native->forth", CHAR_NEWLINE, "call: "
+	
+	MOV B, 0x010A
+	POPW J:I
+	CALL kernel_print_number
+	
+.loop:
+	MOV A, OS_EXIT
+	SYSCALL
+	JMP .loop
+
+
+
+; none interop_push(u32 val)
+; Pushes val onto the parameter stack
+interop_push:
+	PUSHW BP
+	MOVW BP, SP
+	
+	MOVW D:A, [BP + 8]
+	MOVW BP, [interop_psp]
+	BPUSHW D:A
+	MOVW [interop_psp], BP
+	
+	POPW BP
+	RET
+
+
+
+; u32 interop_pop()
+; Pops a cell off the parameter stack and returns it
+interop_pop:
+	PUSHW BP
+	MOVW BP, SP
+	
+	MOVW BP, [interop_psp]
+	BPOPW D:A
+	MOVW [interop_psp], BP
+	
+	POPW BP
+	RET
+
+
+
+; u32 interop_peek()
+; Returns the top of the parameter stack
+interop_peek:
+	PUSHW BP
+	MOVW BP, SP
+	
+	MOVW BP, [interop_psp]
+	MOVW D:A, [BP]
+	
+	POPW BP
+	RET
+
+
+
+; none interop_pcall(ptr xt)
+; Call a forth word using its xt
+interop_pcall:
+	PUSHW BP
+	MOVW BP, SP
+	PUSHW J:I
+	PUSHW L:K
+	
+	MOVW D:A, [BP + 8]
+	
+	MOVW BP, [interop_psp]	; get param stack
+	MOVW L:K, [interop_lsp]	; get locals stack
+	
+	; return stack bounds
+	MOVW [uvar_return_stack_origin], SP
+	MOVW J:I, 0	; we don't know how much space we might have
+	MOVW [uvar_return_stack_end], J:I
+	
+	; CATCH the called function
+	CALL fword_catch
+	
+	; exception handling
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
+	
+	MOVW [interop_psp], BP	; save param stack
+	MOVW [interop_lsp], L:K	; save locals stack
+	
+	; check return stack	
+	POPW L:K
+	POPW J:I
+	POPW BP
+	RET
+	
+.exception:
+	JMPA ptr [interop_exception_handler]
+
+
+
+; none interop_ncall(u8 pointer name_ptr, u16 name_len)
+interop_ncall:
+	PUSHW BP
+	MOVW BP, SP
+	PUSHW J:I
+	PUSHW L:K
+	
+	; Setup for FIND-NAME
+	PUSHW ptr [BP + 8]	; name_ptr
+	CALL interop_push
+	
+	PUSH ptr 0
+	PUSH byte [BP + 12]	; name_len
+	CALL interop_push
+	ADD SP, 9
+	
+	; Setup environment
+	MOVW BP, [interop_psp]	; get param stack
+	MOVW L:K, [interop_lsp]	; get locals stack
+	
+	; return stack bounds
+	LEA J:I, [SP - 4]
+	MOVW [uvar_return_stack_origin], J:I
+	MOVW J:I, 0	; we don't know how much space we might have
+	MOVW [uvar_return_stack_end], J:I
+	
+	; CATCH FIND-NAME
+	MOVW D:A, fword_find_name
+	CALL fword_catch
+	
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
+	
+	MOVW D:A, [BP]	; check return value
+	CMP D, 0
+	JNZ .found_name
+	CMP A, 0
+	JNZ .found_name
+	
+	; didn't find
+.not_found:
+	MOVW D:A, -1
+	JMP .done
+
+.found_name:
+	; Found name. D:A = nt
+	CMP byte [uvar_state], 0
+	JZ .interpreting
+
+.compiling:
+	; Call NAME>COMPILE, EXECUTE
+	CALL fword_nametocompile
+	CALL fword_execute
+	JMP .done
+
+.interpreting:
+	; Call NAME>INTERPRET
+	; If nonzero, call EXECUTE
+	; If zero, not found
+	CALL fword_nametointerpret
+	
+	CMP D, 0
+	JNZ .can_interpret
+	CMP A, 0
+	JZ .not_found
+
+.can_interpret:
+	CALL fword_execute
+	
+.done:
+	MOVW [interop_psp], BP	; save param stack
+	MOVW [interop_lsp], L:K	; save locals stack
+	
+	; check return stack	
+	POPW L:K
+	POPW J:I
+	POPW BP
+	RET
+
+.exception:
+	JMPA ptr [interop_exception_handler]
+
+
+
+;
+; PLACEHOLDERS
+;
+fword_compilec:
+	BPUSHW D:A
+	MOVW D:A, TCODE_UNSUPPORTED
+	JMP fword_throw
 
 
 
@@ -287,8 +543,8 @@ kernel_print_string:
 ; print_name
 ; Prints the name of a word
 ; Argument J:I = header pointer
-; Returns B:C
-; Clobbers none
+; Returns none
+; Clobbers B:C
 kernel_print_name:
 	MOVZ C, [J:I + 4]	; length/flags
 	AND CL, HMASK_LENGTH
@@ -1043,16 +1299,16 @@ kernel_check_overflow:
 	MOVW J:I, BP
 	
 	CMP J, B
-	JG .pstack_underflow
-	JL .pstack_no_underflow
+	JA .pstack_underflow
+	JB .pstack_no_underflow
 	CMP I, C
 	JA .pstack_underflow
 	
 .pstack_no_underflow:
 	MOVW B:C, [uvar_param_stack_end]	; check overflow
 	CMP J, B
-	JG .pstack_ok
-	JL .pstack_overflow
+	JA .pstack_ok
+	JB .pstack_overflow
 	CMP I, C
 	JB .pstack_overflow
 	
@@ -1062,16 +1318,16 @@ kernel_check_overflow:
 	MOVW J:I, SP
 	
 	CMP J, B
-	JG .rstack_underflow
-	JL .rstack_no_underflow
+	JA .rstack_underflow
+	JB .rstack_no_underflow
 	CMP I, C
 	JA .rstack_underflow
 	
 .rstack_no_underflow:
 	MOVW B:C, [uvar_return_stack_end]		; check overflow
 	CMP J, B
-	JG .rstack_ok
-	JL .rstack_overflow
+	JA .rstack_ok
+	JB .rstack_overflow
 	CMP I, C
 	JB .rstack_overflow
 	
@@ -1081,16 +1337,16 @@ kernel_check_overflow:
 	MOVW J:I, L:K
 	
 	CMP J, B
-	JG .lstack_underflow
-	JL .lstack_no_underflow
+	JA .lstack_underflow
+	JB .lstack_no_underflow
 	CMP I, C
 	JA .lstack_underflow
 	
 .lstack_no_underflow:
 	MOVW B:C, [uvar_locals_stack_end]		; check overflow
 	CMP J, B
-	JG .lstack_ok
-	JL .lstack_overflow
+	JA .lstack_ok
+	JB .lstack_overflow
 	CMP I, C
 	JB .lstack_overflow
 	
@@ -1100,8 +1356,8 @@ kernel_check_overflow:
 	MOVW J:I, [uvar_here]
 	
 	CMP J, B
-	JG .dictionary_overflow
-	JL .dictionary_ok
+	JA .dictionary_overflow
+	JB .dictionary_ok
 	CMP I, C
 	JA .dictionary_overflow
 
@@ -2126,10 +2382,148 @@ fword_interpret:
 
 
 
+; SAVE-INPUT ( -- xn ... x1 n )
+; Save input specification
+fhead_save_input:
+	dp fhead_interpret
+	db 10
+	db "SAVE-INPUT"
+fword_save_input:
+	BPUSHW D:A
+	BPUSHW ptr [uvar_input_buffer_start]
+	BPUSHW ptr [uvar_input_buffer_size]
+	BPUSHW ptr [uvar_input_buffer_contents]
+	BPUSHW ptr [uvar_input_buffer_index]
+	BPUSHW ptr [uvar_source_id]
+	MOVW D:A, 5
+	RET
+
+
+
+; RESTORE-INPUT ( xn ... x1 n -- flag )
+; Restore input specification. flag is true if successfully restored.
+fhead_restore_input:
+	dp fhead_save_input
+	db 13
+	db "RESTORE-INPUT"
+fword_restore_input:
+	BPOPW ptr [uvar_source_id]
+	BPOPW ptr [uvar_input_buffer_index]
+	BPOPW ptr [uvar_input_buffer_contents]
+	BPOPW ptr [uvar_input_buffer_size]
+	BPOPW ptr [uvar_input_buffer_start]
+	MOVW D:A, FLAG_TRUE
+	RET
+
+
+
+; N>R ( i*x +n -- ) ( R: -- i*x +n )
+; Place +n items on the return stack
+fhead_ntor:
+	dp fhead_restore_input
+	db 3
+	db "N>R"
+fword_ntor:
+	POPW J:I		; return address
+	MOVW B:C, D:A	; save count
+	JMP .cmp
+	
+.loop:
+	PUSHW ptr [BP]	; param stack -> return stack
+	ADD BP, 4
+	
+	DEC A
+	DCC D
+.cmp:
+	CMP A, 0
+	JNZ .loop
+	CMP D, 0
+	JNZ .loop
+	
+	PUSHW B:C	; push count
+	BPOPW D:A
+	JMPA J:I	; return
+
+
+
+; NR> ( -- i*x +n ) ( R: i*x +n -- )
+; Retrieve items placed on the return stack by N>R
+fhead_nrfrom:
+	dp fhead_ntor
+	db 3
+	db "NR>"
+fword_nrfrom:
+	BPUSHW D:A
+	
+	POPW J:I	; return address
+	POPW B:C	; number of items
+	MOVW D:A, B:C
+	JMP .cmp
+	
+.loop:
+	BPUSHW ptr [SP]	; return stack -> param stack
+	ADD SP, 4
+	
+	DEC A
+	DCC D
+.cmp:
+	CMP A, 0
+	JNZ .loop
+	CMP D, 0
+	JNZ .loop
+	
+	MOVW D:A, B:C
+	JMPA J:I	; return
+
+
+
+; EVALUATE ( i*x c-addr u -- j*x )
+; Save input source. Store -1 in SOURCE-ID. Make the string c-addr u the input source and buffer.
+; Set >IN to zero. Interpret. Once done interpreting, restore prior input
+fhead_evaluate:
+	dp fhead_nrfrom
+	db 8
+	db "EVALUATE"
+fword_evaluate:
+	CALL fword_save_input	; save input on return stack
+	CALL fword_ntor
+	
+	MOVW B:C, -1
+	MOVW [uvar_source_id], B:C
+	BPOPW B:C
+	MOVW [uvar_input_buffer_start], B:C
+	MOVW [uvar_input_buffer_size], D:A
+	MOVW [uvar_input_buffer_contents], D:A
+	MOVW B:C, 0
+	MOVW [uvar_input_buffer_index], B:C
+	
+	BPOPW D:A
+	CALL fword_interpret
+	
+	CALL fword_nrfrom		; restore input from return stack
+	CALL fword_restore_input
+	BPOPW D:A
+	RET
+
+
+
+; EXECUTE ( i*x xt -- j*x )
+; Remove xt from the stack and execute it
+fhead_execute:
+	dp fhead_evaluate
+	db 7
+	db "EXECUTE"
+fword_execute:
+	MOVW B:C, D:A	; pop
+	BPOPW D:A
+	JMPA B:C		; execute
+
+
+
 ; DOT ( n -- )
 ; Displays n
 fhead_dot:
-	dp fhead_interpret
+	dp fhead_execute
 	db 1
 	db "."
 fword_dot:
@@ -2704,6 +3098,14 @@ fword_quit:
 	CMP A, TCODE_NAME_TOO_LONG
 	JE .exception_name_too_long
 	
+	CMP A, TCODE_UNSUPPORTED
+	JE .exception_unsupported
+	
+	CMP A, TCODE_INVALID_ARG
+	JE .exception_invalid_arg
+	CMP A, TCODE_RSTACK_IMBALANCE
+	JE .exception_rstack_imbalance
+	
 	CMP A, TCODE_COMPILER_NESTING
 	JE .exception_compiler_nesting
 	
@@ -2886,6 +3288,18 @@ fword_quit:
 	CALL kernel_print_inline
 	db 24, "Aborted: Name too long.", CHAR_NEWLINE
 	JMP .exception_end
+
+.exception_unsupported:
+	CALL kernel_print_inline
+	db 32, "Aborted: Unsupported operation.", CHAR_NEWLINE
+
+.exception_invalid_arg:
+	CALL kernel_print_inline
+	db 35, "Aborted: Invalid numeric argument.", CHAR_NEWLINE
+
+.exception_rstack_imbalance:
+	CALL kernel_print_inline
+	db 34, "Aborted: Return stack imabalance.", CHAR_NEWLINE
 	
 .exception_compiler_nesting:
 	CALL kernel_print_inline
@@ -6300,7 +6714,7 @@ fword_starslashmod:
 	CALL fword_mstar		; M*
 	BPUSHW D:A				; R>
 	POPW D:A
-	CALL fword_smslashmod	; SM/MOD
+	CALL fword_smslashrem	; SM/REM
 	RET
 
 
@@ -6316,3 +6730,261 @@ fword_starslash:
 	CALL fword_starslashmod	; */MOD
 	ADD BP, 4				; NIP
 	RET
+
+
+
+; FIND-NAME ( c-addr u -- nt | 0 )
+; Find the definition identified by string c-addr u
+; Returns its name token nt if found, otherwise 0
+fhead_find_name:
+	dp fhead_starslash
+	db 9
+	db "FIND-NAME"
+fword_find_name:
+	MOVW B:C, D:A	; length
+	BPOPW J:I		; pointer
+	CALL kernel_search_dict
+	MOVW D:A, J:I	; return
+	RET
+
+
+
+; NAME>STRING ( nt -- c-addr u )
+; Gets the name of the name token nt
+fhead_nametostring:
+	dp fhead_find_name
+	db 11
+	db "NAME>STRING"
+fword_nametostring:
+	MOVZ C, [D:A + 4]	; length/flags
+	AND CL, HMASK_LENGTH
+	
+	ADD A, 5			; name pointer
+	ICC D
+	BPUSHW D:A
+	
+	MOVZ D:A, C			; length
+	RET
+
+
+
+; NAME>INTERPRET ( nt -- xt | 0 )
+; xt represents the interpretation semantics of word nt.
+; If nt does not have interpretation semantics, returns 0
+fhead_nametointerpret:
+	dp fhead_nametostring
+	db 14
+	db "NAME>INTERPRET"
+fword_nametointerpret:
+	; nt -> body
+	MOVW J:I, D:A
+	CALL kernel_get_body	; J:I = body pointer
+	
+	; Detect [COMPILE-ONLY]
+	; : [COMPILE-ONLY] LATEST LITERAL POSTPONE COMPILE-ONLY ; IMMEDIATE
+	; BPUSHW D:A				; 53 00
+	; MOVW D:A, <nt>			; 2B 40 xx xx xx xx
+	; CALL fword_compile_only	; D4 xx
+	;							; D5 xx xx
+	;							; D6 xx xx xx xx
+	MOVW B:C, [J:I]
+	CMP C, 0x00_53
+	JNE .interprable
+	CMP B, 0x40_2B
+	JNE .interprable
+	
+	MOV C, [J:I + 8]
+	CMP CL, 0xD4
+	JB .interprable
+	JE .offset_8
+	CMP CL, 0xD6
+	JA .interprable
+	JE .offset_32
+	
+.offset_16:
+	; branch target = J:I + 11 + offset
+	MOVS B:C, [J:I + 9]
+	ADD C, I
+	ADC B, J
+	ADD C, 11
+	ICC B
+	JMP .compare
+
+.offset_8:
+	; branch target = J:I + 10 + offset
+	MOVS C, [J:I + 9]
+	MOVS B:C, C
+	ADD C, I
+	ADC B, J
+	ADD C, 10
+	ICC B
+	JMP .compare
+
+.offset_32:
+	; branch target = J:I + 13 + offset
+	MOVw B:C, [J:I + 9]
+	ADD C, I
+	ADC B, J
+	ADD C, 13
+	ICC B
+
+.compare:
+	MOVW D:A, fword_compile_only
+	CMP A, C
+	JNE .interprable
+	CMP D, B
+	JNE .interprable
+
+.compile_only:
+	MOVW D:A, 0
+	RET
+
+.interprable:
+	MOVW D:A, J:I
+	RET
+
+
+
+; NAME>COMPILE ( nt -- x xt )
+; x xt represents the compilation semantics of the word nt. 
+; xt has stack effect ( i*x x -- j*x )
+; Executing xt consumes x and performs the compilation semantics of nt
+fhead_nametocompile:
+	dp fhead_nametointerpret
+	db 12
+	db "NAME>COMPILE"
+fword_nametocompile:
+	MOVW J:I, D:A
+	CALL kernel_get_body
+	BPUSHW J:I
+	
+	MOVZ C, [D:A + 4]	; length/flags
+	TST CL, HFLAG_IMMEDIATE
+	JZ .use_compilec
+
+.use_execute:
+	MOVW D:A, fword_execute
+	RET
+
+.use_compilec:
+	MOVW D:A, fword_compilec
+	RET
+
+
+
+; FIND ( c-addr -- c-addr 0 | xt 1 | xt -1 )
+; Find the definition named in counted string c-addr
+; If not found, return c-addr and 0
+; If found, return execution token xt.
+; If the definition is immediate, return 1
+; If the definition is not immediate, return -1
+fhead_find:
+	dp fhead_nametocompile
+	db 4
+	db "FIND"
+fword_find:
+	BPUSHW D:A				; c-addr c-addr
+	CALL fword_count		; c-addr c-addr u
+	CALL fword_find_name	; c-addr nt | 0
+	
+	CMP A, 0
+	JNZ .found
+	CMP D, 0
+	JNZ .found
+	RET
+
+.found:
+	MOVW J:I, D:A			; nt -> body, place
+	CALL kernel_get_body
+	MOVW [BP], J:I
+	
+	MOV CL, [D:A + 4]		; length/flags
+	TST CL, HFLAG_IMMEDIATE	; -1/1 if immediate
+	MOV A, -1
+	CMOVNZ A, 1
+	MOVS D:A, A
+	RET
+
+
+
+; NATIVE-CALL ( i*x u1*x u1*u u1 func-ptr -- j*x return-val )
+; Calls native function func-ptr
+fhead_native_call:
+	dp fhead_find
+	db 11
+	db "NATIVE-CALL"
+fword_native_call:
+	; save rsp on locals stack
+	SUB K, 4
+	DCC L
+	MOVW [L:K], SP
+	
+	; save lsp
+	MOVW [interop_lsp], L:K
+	
+	; D:A = func-ptr
+	; J = arg offset
+	; I = remaining args
+	; L:K = total args
+	BPOPW J:I
+	MOVW L:K, J:I
+	MOV J, I
+	DEC J
+	SHL J, 2
+	JMP .cmp
+	
+.loop:
+	BPOPW B:C	; get arg size
+	CMP B, 0
+	JNZ .invalid
+	CMP C, 4
+	JA .invalid
+	JE .four
+	CMP C, 2
+	JA .invalid
+	JE .two
+	CMP C, 1
+	JE .one
+	JMP .invalid
+
+.one:
+	PUSH byte [BP + J]
+	JMP .dec
+
+.two:
+	PUSH word [BP + J]
+	JMP .dec
+
+.four:
+	PUSHW ptr [BP + J]
+	JMP .dec
+	
+.dec:
+	DEC I
+.cmp:
+	CMP I, 0
+	JNZ .loop
+	
+	; discard arg values
+	MOVW B:C, BP
+	ADD C, K
+	ADC B, L
+	MOVW [interop_psp], B:C
+	
+	; call function
+	CALLA D:A
+	
+	; restore pointers
+	MOVW L:K, [interop_lsp]
+	MOVW BP, [interop_psp]
+	
+	MOVW SP, [L:K]
+	ADD K, 4
+	ICC L
+	RET
+
+.invalid:
+	BPUSHW D:A
+	MOVW D:A, TCODE_INVALID_ARG
+	JMP fword_throw
+	

@@ -34,3 +34,4 @@
 		- [remove_locals](/kernel/remove_locals.md)
 		- [reset_locals](/kernel/reset_locals.md)
 		- [search_dict](/kernel/search_dict.md)
+	- [Interoperability](/interop/)

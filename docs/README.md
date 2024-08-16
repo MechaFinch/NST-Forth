@@ -15,6 +15,7 @@
 
 ## Development Documentation
  * [Kernel Functions](/kernel/)
+ * [Interoperability](/interop/)
 
 ## Links
  * [Forth Standard](https://forth-standard.org/standard/words)

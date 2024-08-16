@@ -2,6 +2,7 @@
 	- [Home](/)
 - Dictionary
 	- [Core](/core/)
+		- [FIND-NAME](/core/find_name.md)
 	- [Exception](/exception/)
 	- [Facility](/facility/)
 	- [Locals](/locals/)
@@ -10,3 +11,4 @@
 	- [Custom](/custom/)
 - Dev
 	- [Kernel Functions](/kernel/)
+	- [Interoperability](/interop/)

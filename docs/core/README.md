@@ -71,8 +71,12 @@
  * EMIT
  * ENDCASE
  * ENDOF
+ * EVALUATE
+ * EXECUTE
  * EXIT
  * FALSE
+ * FIND
+ * [FIND-NAME](/core/find_name.md)
  * FM/MOD (FMSLASHMOD)
  * HERE
  * HEX
@@ -97,10 +101,12 @@
  * RECURSE
  * REFILL
  * REPEAT
+ * RESTORE-INPUT
  * RSHIFT
  * ROT
  * S" (SQ)
  * S>D (STOD)
+ * SAVE-INPUT
  * SM/REM (SMSLASHREM)
  * SPACE
  * SPACES
