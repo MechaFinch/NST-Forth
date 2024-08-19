@@ -23,6 +23,7 @@
  * \< (LESS)
  * \<\> (NOTEQUAL)
  * \> (GREATER)
+ * \>BODY (TOBODY)
  * \>IN (TOIN)
  * \>R (TOR)
  * ?DO (QDO)
@@ -49,6 +50,7 @@
  * ABS
  * ACCEPT
  * AGAIN
+ * ALLOT
  * AND
  * BASE
  * BEGIN
@@ -63,8 +65,10 @@
  * CHARS
  * COUNT
  * CR
+ * CREATE
  * DECIMAL
  * DO
+ * DOES
  * DROP
  * DUP
  * ELSE

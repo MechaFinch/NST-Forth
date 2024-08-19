@@ -149,7 +149,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_native_call
+%define DICT_LATEST fhead_allot
 
 
 
@@ -454,23 +454,46 @@ interop_ncall:
 
 .compiling:
 	; Call NAME>COMPILE, EXECUTE
-	CALL fword_nametocompile
-	CALL fword_execute
+	MOVW D:A, fword_nametocompile
+	CALL fword_catch
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
+	
+	MOVW D:A, fword_execute
+	CALL fword_catch
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
+	
 	JMP .done
 
 .interpreting:
 	; Call NAME>INTERPRET
 	; If nonzero, call EXECUTE
 	; If zero, not found
-	CALL fword_nametointerpret
+	MOVW D:A, fword_nametointerpret
+	CALL fword_catch
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
 	
+	MOVW D:A, [BP]
 	CMP D, 0
 	JNZ .can_interpret
 	CMP A, 0
 	JZ .not_found
 
 .can_interpret:
-	CALL fword_execute
+	MOVW D:A, fword_execute
+	CALL fword_catch
+	CMP D, 0
+	JNZ .exception
+	CMP A, 0
+	JNZ .exception
 	
 .done:
 	MOVW [interop_psp], BP	; save param stack
@@ -6987,4 +7010,149 @@ fword_native_call:
 	BPUSHW D:A
 	MOVW D:A, TCODE_INVALID_ARG
 	JMP fword_throw
+
+
+
+; CREATE ( "<spaces>name" -- )
+; Create a definition with the given name. 
+; name RT: ( -- a-addr)
+;	a-addr is the data field address of name
+fhead_create:
+	dp fhead_native_call
+	db 6
+	db "CREATE"
+fword_create:
+	; parse
+	MOV CL, CHAR_SPACE
+	CALL kernel_parse_token
+	
+	CMP CH, 0
+	JNZ .name_too_long
+	
+	; create
+	CALL kernel_create_word	; B:C = contents, J:I = header
+	
+	; contents = CALLA <ptr>
+	MOVW J:I, B:C
+	MOV CL, 0xD8	; CALLA i32
+	MOVW [J:I], CL
+	MOVW B:C, .do_created
+	MOVW [J:I + 1], B:C
+	
+	ADD I, 5
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+.name_too_long:
+	BPUSHW D:A
+	MOVW D:A, TCODE_NAME_TOO_LONG
+	JMP fword_throw
+
+	; default execution semantics
+.do_created:
+	BPUSHW D:A
+	POPW D:A
+	RET
+
+
+
+; DOES>
+; look at the standard I aint writing allat
+; Make the current definition replace the semantics of the most recent definition with placing its
+; data field address on the stack, followed by the code defined after DOES>. End the current definition.
+fhead_does:
+	dp fhead_create
+	db 5 | HFLAG_IMMEDIATE
+	db "DOES>"
+fword_does:
+	BPUSHW D:A
+	MOVW D:A, fhead_does
+	CALL fword_compile_only
+	
+	PUSHW D:A
+	PUSHW L:K
+	
+	; Compile:
+	;	CALL .do_does
+	;	dp <ptr>
+	MOV A, 0x01_3B					; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4			; CALL i32, n/a, CALL i16, CALL i8
+	MOVW J:I, .do_does				; target
+	MOVW L:K, [uvar_here]			; destination
+	CALL kernel_compile_number		; L:K = HERE
+	
+	PUSHW L:K	; save <ptr> ptr
+	ADD K, 4	; update HERE for ;
+	ICC L
+	MOVW [uvar_here], L:K
+	
+	; end current definition
+	CALL fword_semicolon	; doesn't use locals, no need to restore L:K
+	CALL fword_rbracket		; go back to compilation
+	BPUSHW D:A
+	
+	; place HERE in <ptr>
+	MOVW J:I, [uvar_here]
+	POPW B:C
+	MOVW [B:C], J:I
+	
+	; Compile:
+	;	BPUSHW D:A
+	;	POPW D:A
+	MOVW B:C, 0x00_55_00_53	; BPUSHW D:A; POPW D:A
+	MOVW [J:I], B:C
+	ADD I, 4
+	ICC J
+	MOVW [uvar_here], J:I
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+.do_does:
+	; replace LATEST>BODY + 1 with <ptr>
+	POPW J:I		; return address
+	MOVW B:C, [J:I]	; <ptr>
+	ADD I, 4		; setup return address
+	ICC J
+	PUSHW J:I
+	
+	PUSHW B:C
+	MOVW J:I, [uvar_latest]	; replace CREATE's pointer
+	CALL kernel_get_body
+	POPW ptr [J:I + 1]
+	RET
+
+
+
+; >BODY ( xt -- a-addr )
+; a-addr is the data field address corresponding to xt
+fhead_tobody:
+	dp fhead_does
+	db 5 | HFLAG_INLINE
+	db ">BODY"
+	dw HFLAG_INLINE_STRICT | (fword_tobody.end - fword_tobody)
+fword_tobody:
+	ADD A, 5	; the code of a CREATE xt is CALLA <ptr> (5 bytes)
+	ICC D
+.end:
+	RET
+
+
+
+; ALLOT ( n -- )
+; If n > 0, reserve n bytes of data space
+; If n < 0, release |n| bytes of data space
+; If n = 0, do nothing
+fhead_allot:
+	dp fhead_tobody
+	db 5
+	db "ALLOT"
+fword_allot:
+	MOVW B:C, uvar_here
+	ADD [B:C], A
+	ADC [B:C + 2], D
+	BPOPW D:A
+	RET
 	
