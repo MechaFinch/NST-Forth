@@ -57,8 +57,8 @@
 
 ; OS defines
 %define SYSCALL INT 0x20
-%define OS_EXIT 		0x0001
-%define OS_DEFER		0x0002
+%define OS_EXIT 		0x0000
+%define OS_DEFER		0x0001
 %define OS_MALLOC		0x0010
 %define OS_CALLOC		0x0011
 %define OS_REALLOC		0x0012
@@ -149,7 +149,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_allot
+%define DICT_LATEST fhead_btick
 
 
 
@@ -302,7 +302,7 @@ interop_default_handler:
 	
 	CALL fword_page
 	CALL kernel_print_inline
-	db 46, "Uncaught exception during native->forth", CHAR_NEWLINE, "call: "
+	db 46, "Uncaught exception during native->forth call: "
 	
 	MOV B, 0x010A
 	POPW J:I
@@ -1857,6 +1857,7 @@ kernel_compile_remove_locals:
 	MOVW [uvar_here], J:I
 	
 .fret:
+	MOVW J:I, [uvar_here]
 	RET
 
 .oob:
@@ -7153,6 +7154,97 @@ fword_allot:
 	MOVW B:C, uvar_here
 	ADD [B:C], A
 	ADC [B:C + 2], D
+	BPOPW D:A
+	RET
+
+
+
+; HIDE ( nt -- )
+; Set smudge of nt
+fhead_hide:
+	dp fhead_allot
+	db 4
+	db "HIDE"
+fword_hide:
+	MOV BL, HFLAG_SMUDGE
+	OR [D:A + 4], BL
+	BPOPW D:A
+	RET
+
+
+
+; REVEAL ( nt -- )
+; Clear smudge of nt
+fhead_reveal:
+	dp fhead_hide
+	db 6
+	db "REVEAL"
+fword_reveal:
+	MOV BL, ~HFLAG_SMUDGE
+	AND [D:A + 4], BL
+	BPOPW D:A
+	RET
+
+
+
+; ' ( "<spaces>name" -- xt )
+; Parse name delimited by spaces. Find name and return execution token xt
+fhead_tick:
+	dp fhead_reveal
+	db 1
+	db "'"
+fword_tick:
+	MOV CL, CHAR_SPACE
+	CALL kernel_parse_token
+	CALL kernel_search_dict
+	
+	CMP I, 0
+	JNZ .found
+	CMP J, 0
+	JZ .not_found
+
+.found:	
+	CALL kernel_get_body
+	
+	BPUSHW D:A
+	MOVW D:A, J:I
+	RET
+
+.not_found:
+	BPUSHW D:A
+	MOVW D:A, TCODE_UNDEFINED_WORD
+	JMP fword_throw
+
+
+
+; [']
+; CT: ( "<spaces>name" -- )
+;	Parse name delimited by spaces. Find name and get execution token xt
+; RT: ( -- xt )
+;	Put xt on the stack
+fhead_btick:
+	dp fhead_tick
+	db 3 | HFLAG_IMMEDIATE
+	db "[']"
+fword_btick:
+	BPUSHW D:A
+	MOVW D:A, fhead_btick
+	CALL fword_compile_only
+	
+	CALL fword_tick
+	
+	; Compile:
+	; BPUSHW D:A
+	; MOVW D:A, xt
+	MOVW J:I, [uvar_here]
+	MOVW B:C, 0x40_2B_00_53	; BPUSHW D:A; MOVW D:A, imm
+	MOVW [J:I], B:C
+	MOVW [J:I + 4], D:A
+	
+	ADD I, 8
+	ICC J
+	MOVW [uvar_here], J:I
+	
 	BPOPW D:A
 	RET
 	
