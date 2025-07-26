@@ -41,7 +41,7 @@ Length & Flags		4		1		bit 7:		Immediate	If set, executed during compilation
 Name				5		n		Word name
 (Not Inline) Data	5+n		x		Word data
 (Inline) Code Size	5+n		2		Number of bytes to copy into instruction stream
-									bit 15:		Always		If set, word will always be inlined. Used by locals.
+									bit 15:		Always		If set, word will always be inlined.
 									bit 14:		Strict		If set, word will be inlined in strict inlining mode
 															Set only if code <= 4 instructions & <= 8 bytes
 									bit 13-0:	Size		Number of bytes

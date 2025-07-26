@@ -1,0 +1,117 @@
+
+	Optimizer
+	
+	Design Goals
+-	Transform arbitrary code without modifying its behavior
+	-> Cannot clobber registers
+	-> Cannot optimize when a branch target is inside a pattern
+-	Optimize common patterns found in code compiled by the v2 kernel
+
+	Method
+-	Build table of offsets
+	- Entry: origin, target, size, value
+		
+		00004321: JZ rim16 0x1234
+		00004321: F1 40 34 12
+		origin	00004323
+		target	00005559
+		size	2
+		value	00001234
+		
+-	Linear pass from LATEST to HERE
+	-	Match window against pattern
+	-	Transform window according to pattern
+	-	For each entry in offset table, update according to move
+	-	Move subsequent code, updating HERE
+	- Move window according to decode.
+		- Forward CALLs wrap inline strings
+-	Perform pass at least twice
+
+
+== BINARY PATTERNS ==
+Stack NOP
+	Pattern
+		BPUSHW D:A	53 00
+		BPOPW D:A	57 00
+	Pattern
+		BPOPW D:A	57 00
+		BPUSHW D:A	53 00
+	Pattern
+		BPUSHW B:C	53 02
+		BPOPW B:C	57 10
+	Pattern (unlikely)
+		BPOPW B:C	57 10
+		BPUSHW B:C	53 02
+	Transform
+		(nothing)
+
+Local Variable Load
+	Source
+		<variable local> @
+	Pattern
+		LEA D:A, [L:K + x]	6B 43 28 xx
+		MOVW D:A, [D:A]		2B 42 00
+	Transform
+		MOVW D:A, [L:K + x]	2B 43 28 xx
+
+Local Variable Store
+	Source
+		<variable local> !
+	Pattern
+		LEA D:A, [L:K + x]	6B 43 28 xx
+		BPOPW [D:A]			57 56 00
+	Transform
+		BPOPW [L:K + x]		57 57 28 xx
+
+Constant Tuck
+	Source
+		<literal> SWAP
+	Pattern
+		BPUSHW D:A		53 00
+		MOVS D:A, i16	02 40 xx xx
+		XCHGW D:A, [BP]	29 42 30
+	Pattern
+		BPUSHW D:A		53 00
+		MOVW D:A, i32	2B 40 xx xx xx xx
+		XCHGW D:A, [BP]	29 42 30
+	Transform
+		BPUSHW i32		59 xx xx xx xx
+
+Swap-Minus
+	Source
+		SWAP -
+	Pattern
+		XCHGW D:A, [BP]	29 42 30
+		BPOPW B:C		57 10
+		XCHGW D:A, B:C	29 02
+	Transform
+		MOVW B:C, D:A	2B 10
+		BPOPW D:A		57 10
+	
+== SEMANTIC PATTERNS ==
+Move via Stack
+	Pattern
+		BPUSHW <src>
+		BPOPW <dst>
+	Transform
+		MOVW <dst>, <src>
+	Pattern
+		BPUSHW D:A
+		MOVS/MOVW/LEA D:A, <a != B:C>
+		BPOPW B:C
+	Transform
+		MOVW B:C, D:A
+		MOVS/MOVW/LEA D:A, <a>
+		
+Push Chain
+	Pattern
+		MOVS/MOVW D:A, <a>
+		BPUSHW D:A
+		MOVS/MOVW/LEA D:A, <b>
+	Transform
+		BPUSHW <a>
+		MOVS/MOVW/LEA D:A, <b>
+
+Branch Compression
+	i16 branch -> i8 branch
+

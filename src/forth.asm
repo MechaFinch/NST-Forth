@@ -4,7 +4,7 @@
 ; OS Edition
 ;
 
-%include "fakeos/fakeos.asm" as os
+%include "fakeos/os.asm" as os
 %include "math/mathutil.asm" as mutil
 
 ; Parameters
@@ -149,7 +149,7 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 
 
 ; other
-%define DICT_LATEST fhead_btick
+%define DICT_LATEST fhead_get_xy
 
 
 
@@ -164,7 +164,10 @@ uvar_locals_size:			dp 0	; number of bytes of locals
 ; wahoo
 entry:
 	; get OS running
+	PUSH ptr 0x0008_0000
+	PUSH ptr 0x0002_0000
 	CALL os.init
+	ADD SP, 8
 .start:
 	PUSH word PARAM_STACK_PADDING
 	PUSH word PARAM_USER_DICT_PADDING
@@ -309,7 +312,7 @@ interop_default_handler:
 	CALL kernel_print_number
 	
 .loop:
-	MOV A, OS_EXIT
+	MOV A, OS_DEFER
 	SYSCALL
 	JMP .loop
 
@@ -513,10 +516,6 @@ interop_ncall:
 ;
 ; PLACEHOLDERS
 ;
-fword_compilec:
-	BPUSHW D:A
-	MOVW D:A, TCODE_UNSUPPORTED
-	JMP fword_throw
 
 
 
@@ -962,7 +961,7 @@ kernel_convert_number:
 ; compile_number
 ; Places value at the destination pointer with prefix and variable length
 ; Arguments
-;	AH	Offset
+;	AH	Offset (unsigned)
 ;	AL	Parameters
 ;	BH	4-byte prefix
 ;	BL	3-byte prefix
@@ -1149,7 +1148,7 @@ kernel_compile_number:
 	JMP .ret
 	
 .place_4:
-	MOVS C, CH			; get offset
+	MOVZ C, CH			; get offset
 	MOV B, J			; get prefix
 	MOV [L:K], BH		; place prefix
 	LEA L:K, [L:K + C]	; place value
@@ -1159,7 +1158,7 @@ kernel_compile_number:
 	JMP .ret
 
 .place_3:
-	MOVS C, CH			; get offset
+	MOVZ C, CH			; get offset
 	MOV B, J			; get prefix
 	MOV [L:K], BL		; place prefix
 	LEA L:K, [L:K + C]	; place value
@@ -1170,7 +1169,7 @@ kernel_compile_number:
 	JMP .ret
 
 .place_2:
-	MOVS C, CH			; get offset
+	MOVZ C, CH			; get offset
 	MOV B, I			; get prefix
 	MOV [L:K], BH		; place prefix
 	LEA L:K, [L:K + C]	; place value
@@ -1180,7 +1179,7 @@ kernel_compile_number:
 	JMP .ret
 
 .place_1:
-	MOVS C, CH			; get offset
+	MOVZ C, CH			; get offset
 	MOV B, I			; get prefix
 	MOV [L:K], BL		; place prefix
 	LEA L:K, [L:K + C]	; place value
@@ -2080,8 +2079,16 @@ kernel_do_get_local_addr:
 ; Clobbers B
 kernel_get_body:
 	MOVZ B, [J:I + 4]		; length/flags
+	MOV CL, BL
+	
+	TST CL, HFLAG_INLINE	; add 2 if inlinable
+	MOV CL, 5
+	CMOVNZ CL, 7
+	
 	AND BL, HMASK_LENGTH
-	LEA J:I, [J:I + B + 5]	; header -> body
+	ADD BL, CL
+	
+	LEA J:I, [J:I + B]		; header -> body
 	RET
 
 
@@ -2093,7 +2100,7 @@ kernel_get_body:
 ; Otherwise, skip offset to return
 kernel_do_zero_branch:
 	POPW J:I		; return address
-	MOV C, [J:I]	; offset
+	MOVS B:C, [J:I]	; offset
 	ADD I, 2
 	ICC J
 	
@@ -2103,11 +2110,126 @@ kernel_do_zero_branch:
 	JNZ .nz
 
 .z:
-	LEA J:I, [J:I + C]	; add offset to branch
+	ADD I, C		; add offset to branch
+	ADC J, B
 
 .nz:
 	BPOPW D:A
 	JMPA J:I
+
+
+
+; compile_word
+; Perform the compilation semantics of a word
+; Factored out of fword_interpret
+; Argument J:I = header pointer
+; Clobbers B:C
+kernel_compile_word:
+	MOV CL, [J:I + 4]		; length/flags
+	TST CL, HFLAG_IMMEDIATE	; immediate?
+	JNZ .execute
+	
+	PUSH CL
+	TST CL, HFLAG_INLINE	; get body pointer
+	MOV CH, 5
+	CMOVNZ CH, 7
+	
+	AND CL, HMASK_LENGTH
+	ADD CL, CH
+	MOV CH, 0
+	
+	ADD I, C
+	ICC J
+	
+	POP CL
+	TST CL, HFLAG_INLINE	; inline or compile?
+	JZ .compile_not_inline
+	
+.is_inline:
+	MOV B, [J:I - 2]				; inlining size
+	TST B, HFLAG_INLINE_ALWAYS		; INLINE_ALWAYS overrides mode
+	JNZ .compile_inline
+	
+	MOV CL, [uvar_inlining_mode]	; check mode
+	CMP CL, INLINE_MODE_NEVER
+	JE .compile_not_inline
+	
+	TST B, HFLAG_INLINE_STRICT		; if not NEVER, INLINE_STRICT does inlining
+	JNZ .compile_inline
+	
+	CMP CL, INLINE_MODE_ALWAYS		; word isn't strict or always, inline as specified
+	JNE .compile_not_inline
+
+.compile_inline:
+	PUSHW D:A
+	
+	AND B, HMASK_CODE_SIZE	; D:A = length
+	MOVZ D:A, B
+	MOVW B:C, J:I			; B:C = source
+	MOVW J:I, [uvar_here]	; J:I = destination
+	
+	ADD I, A				; update HERE
+	ADC J, D
+	XCHGW J:I, [uvar_here]
+	
+	CALL kernel_memcopy		; copy
+	
+	POPW D:A
+	JMP .ret
+
+.compile_not_inline:
+	CMP byte [uvar_inlinable], 0	; If INLINABLE nonzero, don't use relative
+	JNZ .compile_inlinable
+
+.compile_not_inlinable:
+	PUSH A
+	PUSHW L:K
+	
+	; Compile:
+	;	CALL <word>
+	MOV A, 0x01_3B			; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
+	MOVW B:C, 0xD6_00_D5_D4	; CALL i32, n/a, CALL i16, CALL i8
+	MOVW L:K, [uvar_here]	; destination
+	CALL kernel_compile_number
+	MOVW [uvar_here], L:K	; and update HERE
+	
+	POPW L:K
+	POP A
+	JMP .ret
+
+.compile_inlinable:
+	; Compile CALLA <word>
+	PUSH DL
+	
+	MOVW B:C, [uvar_here]
+	MOV DL, 0xD8		; CALLA i32
+	MOV [B:C], DL		; opcode
+	MOVW [B:C + 1], J:I	; pointer
+	
+	ADD C, 5	; update HERE
+	ICC B
+	MOVW [uvar_here], B:C
+	
+	POP DL
+	JMP .ret
+
+.execute:
+	MOV CL, [J:I + 4]		; length/flags
+	TST CL, HFLAG_INLINE	; skip 2 bytes if inlinable
+	MOV CH, 5
+	CMOVNZ CH, 7
+	
+	AND CL, HMASK_LENGTH
+	ADD CL, CH
+	MOV CH, 0
+	
+	ADD I, C
+	ICC J
+	CALLA J:I
+	
+.ret:
+	CALL kernel_check_overflow
+	RET
 
 
 
@@ -2226,7 +2348,6 @@ fword_interpret:
 	; not empty. try to FIND the word
 	CALL kernel_search_dict
 	
-	; debug: display if we found it
 	CMP J, 0
 	JNZ .found
 	CMP I, 0
@@ -2294,93 +2415,9 @@ fword_interpret:
 	ADD SP, 6					; discard token
 	CMP byte [uvar_state], 0	; are we interpreting
 	JZ .interpret_word
-
-.compile_word:
-	MOV CL, [J:I + 4]		; length/flags
-	TST CL, HFLAG_IMMEDIATE	; immediate?
-	JNZ .interpret_word
 	
-	PUSH CL
-	TST CL, HFLAG_INLINE	; get body pointer
-	MOV CH, 5
-	CMOVNZ CH, 7
-	
-	AND CL, HMASK_LENGTH
-	ADD CL, CH
-	MOV CH, 0
-	
-	ADD I, C
-	ICC J
-	
-	POP CL
-	TST CL, HFLAG_INLINE	; inline or compile?
-	JZ .compile_word_not_inline
-	
-	MOV B, [J:I - 2]				; get inline size
-	TST B, HFLAG_INLINE_ALWAYS		; INLINE_ALWAYS overrides mode
-	JNZ .compile_word_inline
-	
-	MOV CL, [uvar_inlining_mode]	; check mode
-	CMP CL, INLINE_MODE_NEVER
-	JE .compile_word_not_inline
-	
-	TST B, HFLAG_INLINE_STRICT		; if not NEVER, INLINE_STRICT does inlining
-	JNZ .compile_word_inline
-	
-	CMP CL, INLINE_MODE_ALWAYS		; word isn't strict or always, inline as specified
-	JNE .compile_word_not_inline
-
-.compile_word_inline:
-	PUSHW D:A
-	
-	AND B, HMASK_CODE_SIZE	; D:A = length
-	MOVZ D:A, B
-	MOVW B:C, J:I			; B:C = source
-	MOVW J:I, [uvar_here]	; J:I = destination
-	
-	ADD I, A				; update HERE
-	ADC J, D
-	XCHGW J:I, [uvar_here]
-	
-	CALL kernel_memcopy		; copy
-	
-	POPW D:A
-	JMP .repeat
-
-.compile_word_not_inline:
-	CMP byte [uvar_inlinable], 0	; if INLINABLE is nonzero, dont use relative stuff
-	JNZ .compile_word_inlinable
-
-.compile_word_non_inlinable:
-	PUSH A
-	PUSHW L:K
-	
-	; Compile CALL <word>
-	MOV A, 0x01_3B			; offset 1; compute difference; signed; 4, 2, 1 bytes allowed
-	MOVW B:C, 0xD6_00_D5_D4	; CALL i32, n/a, CALL i16, CALL i8
-	MOVW L:K, [uvar_here]	; destination
-	CALL kernel_compile_number
-	MOVW [uvar_here], L:K	; and update HERE
-	
-	POPW L:K
-	POP A
-	JMP .repeat
-
-.compile_word_inlinable:
-	; Compile CALLA <word>
-	PUSH DL
-	
-	MOVW B:C, [uvar_here]
-	MOV DL, 0xD8		; CALLA i32
-	MOV [B:C], DL		; opcode
-	MOVW [B:C + 1], J:I	; pointer
-	
-	ADD C, 5	; update HERE
-	ICC B
-	MOVW [uvar_here], B:C
-	
-	POP DL
-	JMP .repeat
+	CALL kernel_compile_word	; includes a kernel_check_overflow call
+	JMP fword_interpret
 
 	; run the word
 .interpret_word:
@@ -3350,7 +3387,15 @@ fhead_words:
 	db 5
 	db "WORDS"
 fword_words:
+	PUSHW D:A
 	PUSHW L:K
+	
+	; get terminal parameters
+	CALL os.get_term_area
+	PUSHW D:A
+	
+	; Get a fresh screen
+	CALL fword_page
 	
 	; get LATEST, print
 	CMP byte [uvar_locals_count], 0
@@ -3367,10 +3412,54 @@ fword_words:
 	TST CL, HFLAG_SMUDGE	; skip if smudged
 	JNZ .next
 	
+	; Check if there's space to print
+.posloop:
+	PUSH CL
+	CALL os.get_term_pos	; AH = y, AL = x
+	POP CL
+	
+	PSUB8 A, [SP + 2]		; subtract origin from x & y
+	MOV D, [SP]				; DH = lines left, DL = cols left
+	PSUB8 D, A
+	
+.check_line:
+	CMP DH, 1
+	JA .check_len
+	
+	; last line, print continue message
+	CALL kernel_print_inline
+	db 35, "     <Press any key for next page.>"
+	
+	MOV A, OS_READ_FILE
+	MOV D, OS_STDIN
+	MOVW B:C, 1
+	PUSH A
+	MOVW J:I, SP
+	SYSCALL
+	POP A
+	
+	CALL fword_page
+	JMP .can_print
+	
+.check_len:
+	AND CL, HMASK_LENGTH
+	CMP CL, DL
+	JB .can_print
+	
+	; not enough space, newline
+	PUSH D
+	PUSH C
+	MOV CL, CHAR_NEWLINE
+	CALL kernel_print_char
+	POP C
+	POP D
+	JMP .posloop
+	
+.can_print:
 	MOVW J:I, L:K			; print
 	CALL kernel_print_name
 	
-	MOV CL, CHAR_SPACE		; separate
+	MOV CL, CHAR_NEWLINE		; separate
 	CALL kernel_print_char
 	
 .next:
@@ -3384,7 +3473,9 @@ fword_words:
 	MOV CL, CHAR_NEWLINE
 	CALL kernel_print_char
 	
+	ADD SP, 4	; discard terminal parameters
 	POPW L:K
+	POPW D:A
 	RET
 
 
@@ -3393,7 +3484,7 @@ fword_words:
 ; Create a definition for name. Enter compilation state.
 fhead_colon:
 	dp fhead_words
-	db 1 | HFLAG_IMMEDIATE
+	db 1
 	db ":"
 fword_colon:
 	; check STATE
@@ -3445,10 +3536,101 @@ fword_colon:
 
 
 
+; IMMEDIATE: IT: ( "<spaces>name" -- colon-sys )
+; Equivalent to : name [ IMMEDIATE ]
+fhead_immediate_colon:
+	dp fhead_colon
+	db 10
+	db "IMMEDIATE:"
+fword_immediate_colon:
+	CALL fword_colon
+	CALL fword_immediate
+	RET
+
+
+
+; INLINE: IT: ( "<spaces>name" -- colon-sys )
+; Create an inlinable definition for name. Enter compilation state.
+fhead_inline_colon:
+	dp fhead_immediate_colon
+	db 7
+	db "INLINE:"
+fword_inline_colon:
+	CALL fword_colon
+	
+	; Set inlinable flag
+	MOVW J:I, [uvar_latest]
+	MOV CL, HFLAG_INLINE
+	OR [J:I + 4], CL
+	
+	; Make space for size
+	MOVW J:I, [uvar_here]
+	MOV C, 0
+	MOV [J:I], C
+	
+	ADD I, 2
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+
+
+; INLINESTRICT: IT: ( "<spaces>name" -- colon-sys )
+; Create an inlinable definition for name, with inlining mode STRICT. Enter compilation state.
+fhead_inlinestrict_colon:
+	dp fhead_immediate_colon
+	db 13
+	db "INLINESTRICT:"
+fword_inlinestrict_colon:
+	CALL fword_colon
+	
+	; Set inlinable flag
+	MOVW J:I, [uvar_latest]
+	MOV CL, HFLAG_INLINE
+	OR [J:I + 4], CL
+	
+	; Make space for size
+	MOVW J:I, [uvar_here]
+	MOV C, HFLAG_INLINE_STRICT
+	MOV [J:I], C
+	
+	ADD I, 2
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+
+
+; INLINEALWAYS: IT: ( "<spaces>name" -- colon-sys )
+; Create an inlinable definition for name, with inlining mode ALWAYS. Enter compilation state.
+fhead_inlinealways_colon:
+	dp fhead_inlinestrict_colon
+	db 13
+	db "INLINEALWAYS:"
+fword_inlinealways_colon:
+	CALL fword_colon
+	
+	; Set inlinable flag
+	MOVW J:I, [uvar_latest]
+	MOV CL, HFLAG_INLINE
+	OR [J:I + 4], CL
+	
+	; Make space for size
+	MOVW J:I, [uvar_here]
+	MOV C, HFLAG_INLINE_ALWAYS
+	MOV [J:I], C
+	
+	ADD I, 2
+	ICC J
+	MOVW [uvar_here], J:I
+	RET
+
+
+
 ; COMPILE-ONLY ( nt -- )
 ; Throws exception -14 if not compiling, setting thrower to nt
 fhead_compile_only:
-	dp fhead_colon
+	dp fhead_inlinealways_colon
 	db 12
 	db "COMPILE-ONLY"
 fword_compile_only:
@@ -3480,6 +3662,26 @@ fword_semicolon:
 	CALL kernel_remove_locals
 	CALL kernel_reset_locals
 	
+	; If the inlinable flag is set, set inlining size
+	MOV CL, HFLAG_INLINE
+	TST [D:A + 4], CL
+	JZ .not_inline
+	
+	MOVW J:I, D:A
+	CALL kernel_get_body
+	
+	MOVW B:C, [uvar_here]	; B:C = size
+	SUB C, I
+	SBB B, J
+	JNZ .inline_too_large
+	TST C, (HFLAG_INLINE_ALWAYS | HFLAG_INLINE_STRICT)
+	JNZ .inline_too_large
+	
+	MOV B, (HFLAG_INLINE_ALWAYS | HFLAG_INLINE_STRICT)
+	AND [J:I - 2], B
+	OR [J:I - 2], C			; place size
+	
+.not_inline:
 	; Compile RET
 	MOVW J:I, [uvar_here]
 	MOV CL, 0xE0	; RET
@@ -3501,12 +3703,132 @@ fword_semicolon:
 	BPOPW D:A
 	RET
 
+.inline_too_large:
+	BPUSHW D:A
+	MOVW D:A, TCODE_OUT_OF_RANGE
+	call fword_throw
+
+
+
+; IMMEDIATE CT: ( -- )
+; Make most recent definition immediate
+fhead_immediate:
+	dp fhead_semicolon
+	db 9
+	db "IMMEDIATE"
+fword_immediate:
+	; make definition immediate
+	MOVW J:I, [uvar_latest]
+	MOV CL, HFLAG_IMMEDIATE
+	OR [J:I + 4], CL
+	
+	RET
+
+
+
+; LITERAL
+; CT: ( x -- )
+; RT: ( -- x )
+fhead_literal:
+	dp fhead_immediate
+	db 7 | HFLAG_IMMEDIATE
+	db "LITERAL"
+fword_literal:
+	CMP byte [uvar_state], 0
+	JZ .interpret
+	
+	PUSHW L:K
+	MOVW J:I, D:A
+	
+	MOVW L:K, [uvar_here]	; place BPUSHW D:A
+	MOV A, 0x00_53
+	MOV [L:K], A
+	ADD K, 2
+	ICC L
+	
+	MOV A, 0x021A		; offset 2, signed, 2/4 allowed
+	MOV B, 0x2B40		; prefix 4 = MOVW, also RIM
+	MOV CH, 0x02		; prefix 2 = MOVS
+	MOV [L:K + 1], BL	; place RIM
+	CALL kernel_compile_number
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	BPOPW D:A
+	RET
+
+.interpret:
+	RET
+
+
+
+; >NUMBER ( ud1 c-addr1 u1 -- ud2 c-addr2 u2 )
+; For each character in c-addr1 u1, convert to a number according to BASE, multiply ud1 by BASE,
+; and add it to ud1. If a character is not convertable or the string ends, converesion stops.
+; c-addr2 u2 is the remaining string after conversion stops.
+fhead_tonumber:
+	dp fhead_literal
+	db 7
+	db ">NUMBER"
+fword_tonumber:
+	; D:A = string length
+	; J:I = string ptr
+	; [BP + 4] = accumulator
+	MOVW J:I, [BP]
+
+.loop:
+	CMP A, 0
+	JNZ .more_digits
+	CMP D, 0
+	JZ .no_more_digits
+
+.more_digits:
+	; convert digit
+	PUSHW J:I
+	MOV C, 1
+	CALL kernel_convert_number
+	CMP C, 0
+	JE .end_failed
+	
+	; digit converted successfully
+	; multiply ud1 by BASE
+	PUSHW D:A
+	
+	PUSHW ptr [BP + 4]
+	PUSHW ptr [uvar_base]
+	CALL mutil.mulu32
+	ADD SP, 8
+	
+	MOVW [BP + 4], D:A
+	POPW D:A
+	
+	; add digit to ud1
+	ADD [BP + 4], I
+	ADC [BP + 6], J
+	POPW J:I
+	
+	; increment pointer, decrement character count
+	INC I
+	ICC J
+	DEC A
+	DCC D
+	JMP .loop
+
+	; a digit conversion failed
+.end_failed:
+	POPW ptr [BP]	; set c-addr2
+	RET
+
+.no_more_digits:
+	MOVW [BP], J:I	; set c-addr2
+	RET
+
 
 
 ; DROP ( x -- )
 ; Drops TOS
 fhead_drop:
-	dp fhead_semicolon
+	dp fhead_tonumber
 	db 4 | HFLAG_INLINE
 	db "DROP"
 	dw HFLAG_INLINE_STRICT | (fword_drop.end - fword_drop)
@@ -3532,10 +3854,40 @@ fword_2drop:
 
 
 
+; NIP ( x1 x2 -- x2 )
+; Drop NOS
+fhead_nip:
+	dp fhead_2drop
+	db 3 | HFLAG_INLINE
+	db "NIP"
+	dw HFLAG_INLINE_STRICT | (fword_nip.end - fword_nip)
+fword_nip:
+	ADD BP, 4	;	2	2
+.end:
+	RET
+
+
+
+; 2NIP ( x1 x2 x3 x4 -- x3 x4 )
+; Drop pair x1 x2
+fhead_2nip:
+	dp fhead_nip
+	db 4 | HFLAG_INLINE
+	db "2NIP"
+	dw HFLAG_INLINE_STRICT | (fword_2nip.end - fword_2nip)
+fword_2nip:
+	BPOPW B:C		;	2	2
+	ADD BP, 4		;	2	4
+	MOVW [BP], B:C	;	3	7
+.end:
+	RET
+
+
+
 ; DUP ( x -- x x )
 ; Duplicate x
 fhead_dup:
-	dp fhead_2drop
+	dp fhead_2nip
 	db 3 | HFLAG_INLINE
 	db "DUP"
 	dw HFLAG_INLINE_STRICT | (fword_dup.end - fword_dup)
@@ -3669,10 +4021,39 @@ fword_2over:
 
 
 
+; TUCK ( x1 x2 -- x2 x1 x2 )
+; Copy TOS under NOS
+fhead_tuck:
+	dp fhead_2over
+	db 4 | HFLAG_INLINE
+	db "TUCK"
+	dw HFLAG_INLINE_STRICT | (fword_tuck.end - fword_tuck)
+fword_tuck:
+	MOVW B:C, D:A	;	2	2
+	XCHGW [BP], B:C	;	3	5
+	BPUSHW B:C		;	2	7
+.end:
+	RET
+
+
+
+; 2TUCK ( x1 x2 x3 x4 -- x3 x4 x1 x2 x3 x4 )
+; Copy pair x3 x4 under pair x1 x2
+fhead_2tuck:
+	dp fhead_tuck
+	db 5
+	db "2TUCK"
+fword_2tuck:
+	CALL fword_2swap
+	CALL fword_2over
+	RET
+
+
+
 ; ROT ( x1 x2 x3 -- x2 x3 x1 )
 ; Rotates top 3 on stack
 fhead_rot:
-	dp fhead_2over
+	dp fhead_2tuck
 	db 3 | HFLAG_INLINE
 	db "ROT"
 	dw HFLAG_INLINE_STRICT | (fword_rot.end - fword_rot)
@@ -5037,7 +5418,7 @@ fword_equal:
 fhead_zeroequal:
 	dp fhead_equal
 	db 2
-	db "0<"
+	db "0="
 fword_zeroequal:
 	CMP D, 0
 	JNE .false
@@ -5739,8 +6120,11 @@ fword_loop:
 	POPW J:I		; return address
 	MOVW [SP], B:C	; update index
 	
-	MOV C, [J:I]			; offset
-	LEA J:I, [J:I + C + 2]	; branch
+	MOVS B:C, [J:I]	; offset
+	ADD I, C		; branch
+	ADC J, B
+	ADD I, 2
+	ICC J
 	JMPA J:I
 
 .do_loop_fall:
@@ -5848,8 +6232,11 @@ fword_ploop:
 	POPW J:I		; return address
 	MOVW [SP], B:C	; update index
 	
-	MOV C, [J:I]			; get offset
-	LEA J:I, [J:I + C + 2]	; branch
+	MOVS B:C, [J:I]	; get offset
+	ADD I, C		; branch
+	ADC J, B
+	ADD I, 2
+	ICC J
 	JMPA J:I
 
 .fall:
@@ -6147,7 +6534,7 @@ fword_case:
 ; CT: ( C: -- of-sys )
 ;	Create of-sys
 ; RT: ( x1 x2 -- | x1 )
-;	If x1 != x1, discard x2 and continue at the consumer of of-sys. Otherwise, discard x1 and x2.
+;	If x1 != x2, discard x2 and continue at the consumer of of-sys. Otherwise, discard x1 and x2.
 fhead_of:
 	dp fhead_case
 	db 2 | HFLAG_IMMEDIATE
@@ -6215,7 +6602,6 @@ fword_of:
 
 .do_of:
 	POPW J:I		; return address
-	MOV C, [J:I]
 	ADD I, 2
 	ICC J
 	
@@ -6232,7 +6618,9 @@ fword_of:
 
 .do_of_ne:
 	MOVW D:A, B:C		; discard x2
-	LEA J:I, [J:I + C]	; add offset to branch
+	MOVS B:C, [J:I - 2]	; get offset
+	ADD I, C			; branch
+	ADC J, B
 	JMPA J:I
 	
 
@@ -6757,11 +7145,46 @@ fword_starslash:
 
 
 
+; PARSE ( char "ccc<char>" -- c-addr u )
+; Parse ccc delimited by char, returning string c-addr u
+fhead_parse:
+	dp fhead_starslash
+	db 5
+	db "PARSE"
+fword_parse:
+	MOV CL, AL
+	CALL kernel_parse_token
+	
+	MOVZ D:A, C
+	BPUSHW J:I
+	
+	RET
+
+
+
+; PARSE-NAME ( "<spaces>name<space>" -- c-addr u )
+; Skip leading spaces; parse a name delimited by a space, returning string c-addr u
+fhead_parse_name:
+	dp fhead_parse
+	db 10
+	db "PARSE-NAME"
+fword_parse_name:
+	MOV CL, CHAR_SPACE
+	CALL kernel_parse_token
+	
+	BPUSHW D:A
+	BPUSHW J:I
+	MOVZ D:A, C
+	
+	RET
+
+
+
 ; FIND-NAME ( c-addr u -- nt | 0 )
 ; Find the definition identified by string c-addr u
 ; Returns its name token nt if found, otherwise 0
 fhead_find_name:
-	dp fhead_starslash
+	dp fhead_parse_name
 	db 9
 	db "FIND-NAME"
 fword_find_name:
@@ -7246,5 +7669,164 @@ fword_btick:
 	MOVW [uvar_here], J:I
 	
 	BPOPW D:A
+	RET
+
+
+
+; POSTPONE ( "<spaces>name" -- )
+; Parse a name delimited by a space. Find name. Append the compilation semantics of name to
+; the current definition.
+fhead_postpone:
+	dp fhead_btick
+	db 8 | HFLAG_IMMEDIATE
+	db "POSTPONE"
+fword_postpone:
+	BPUSHW D:A
+	MOVW D:A, fhead_postpone
+	CALL fword_compile_only
+	
+	; Parse & find
+	MOV CL, CHAR_SPACE
+	CALL kernel_parse_token
+	CALL kernel_search_dict
+	
+	CMP I, 0
+	JNZ .found
+	CMP J, 0
+	JZ .not_found
+
+.found:
+	MOV CL, [J:I + 4]
+	TST CL, HFLAG_IMMEDIATE
+	JNZ .immediate
+
+.not_immediate:
+	; Compile:
+	;	CALL .do_postpone
+	;	dp <header>
+	PUSHW D:A
+	PUSHW L:K
+	PUSHW J:I
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW J:I, .do_postpone
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	
+	POPW J:I
+	MOVW [L:K], J:I
+	
+	ADD K, 4
+	ICC L
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	POP D:A
+	RET
+
+.immediate:
+	; Compile:
+	;	CALL <body>
+	PUSHW D:A
+	PUSHW L:K
+	
+	CALL kernel_get_body
+	
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	MOVW [uvar_here], L:K
+	
+	POPW L:K
+	POPW D:A
+	RET
+
+.not_found:
+	BPUSHW D:A
+	MOVW D:A, TCODE_UNDEFINED_WORD
+	JMP fword_throw
+
+.do_postpone:
+	MOVW J:I, [SP]		; header pointer
+	MOVW J:I, [J:I]
+	CALL kernel_compile_word
+	
+	POPW J:I			; return
+	ADD I, 4
+	ICC J
+	JMPA J:I
+
+
+
+; COMPILE, ( xt -- )
+; Append the execution semantics of xt to the current definition
+fhead_compilec:
+	dp fhead_postpone
+	db 8
+	db "COMPILE,"
+fword_compilec:
+	MOVW J:I, D:A
+	BPOPW D:A
+	
+	; Compile:
+	;	CALL xt
+	MOV A, 0x01_3B
+	MOVW B:C, 0xD6_00_D5_D4
+	MOVW L:K, [uvar_here]
+	CALL kernel_compile_number
+	MOVW [uvar_here], L:K
+	
+	RET
+
+
+
+; AT-XY ( u1 u2 -- )
+; Set cursor position to row u2, column u1
+fhead_at_xy:
+	dp fhead_compilec
+	db 5
+	db "AT-XY"
+fword_at_xy:
+	CALL kernel_print_inline
+	db 2, CHAR_ESCAPE, "["
+	
+	MOV B, 0x000A
+	BPOPW J:I
+	CALL kernel_print_number
+	
+	MOV CL, ';'
+	CALL kernel_print_char
+	
+	MOV B, 0x000A
+	MOVW J:I, D:A
+	CALL kernel_print_number
+	
+	MOV CL, 'f'
+	CALL kernel_print_char
+	
+	BPOPW D:A
+	RET
+
+
+
+; GET-XY ( -- u1 u2 )
+; Returns cursor position row u2, column u1
+fhead_get_xy:
+	dp fhead_at_xy
+	db 6
+	db "GET-XY"
+fword_get_xy:
+	BPUSHW D:A
+	
+	CALL os.get_term_pos
+	MOVZ C, AH	; row
+	MOV B, 0
+	BPUSHW B:C
+	
+	MOVZ A, AL	; col
+	MOV D, 0
+	
 	RET
 	

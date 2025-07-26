@@ -9,6 +9,7 @@
  * [compile_local](/kernel/compile_local.md)
  * [compile_number](/kernel/compile_number.md)
  * [compile_remove_locals](/kernel/compile_remove_locals.md)
+ * [compile_word](/kernel/compile_word.md)
  * [convert_number](/kernel/convert_number.md)
  * [create_local](/kernel/create_local.md)
  * [create_word](/kernel/create_word.md)

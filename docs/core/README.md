@@ -27,6 +27,7 @@
  * \> (GREATER)
  * \>BODY (TOBODY)
  * \>IN (TOIN)
+ * \>NUMBER (TONUMBER)
  * \>R (TOR)
  * ?DO (QDO)
  * ?DUP (QDUP)
@@ -88,9 +89,11 @@
  * HEX
  * I
  * IF
+ * IMMEDIATE
  * INVERT
  * J
  * LEAVE
+ * LITERAL
  * LOOP
  * LSHIFT
  * M\* (MSTAR)
@@ -98,9 +101,13 @@
  * MIN
  * MOD
  * NEGATE
+ * NIP
  * OF
  * OR
  * OVER
+ * PARSE
+ * PARSE-NAME
+ * POSTPONE
  * QUIT
  * R@ (RFETCH)
  * R> (RFROM)
